@@ -1,0 +1,8 @@
+# 1. 提取复数谱特征
+python extract_complex_spec.py --input_dir /root/autodl-tmp/datasets/ljspeech/LJSpeech-1.1/wavs --output_dir /root/autodl-tmp/datasets/ljspeech/complex
+
+# 2. 提取梅尔谱特征
+python extract_mel_spec.py --input_dir /root/autodl-tmp/datasets/ljspeech/LJSpeech-1.1/wavs --output_dir /root/autodl-tmp/datasets/ljspeech/mel
+
+# 3. 生成CSV文件
+python generate_csv.py --mel_dir /root/autodl-tmp/datasets/ljspeech/features/mel --complex_dir /root/autodl-tmp/datasets/ljspeech/features/complex --output_dir /root/autodl-tmp/datasets/ljspeech/features/csv/mel_complex_csv

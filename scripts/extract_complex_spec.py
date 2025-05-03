@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-提取复数谱特征
+Extract Complex Spectrogram Features
 
-从音频目录提取复数谱特征并保存为npy文件。
-复数谱的实部和虚部会拼接成一个实数向量。
+Reads audio file paths from filelist, extracts complex spectrogram features and saves them as npy files.
+The real and imaginary parts of the complex spectrogram are concatenated into a real-valued vector.
 """
 import os
 import argparse
@@ -13,110 +13,122 @@ from tqdm import tqdm
 import soundfile as sf
 
 
-def extract_complex_spectrogram(audio_path, n_fft=2048, hop_length=512, win_length=None):
+def extract_complex_spectrogram(audio_path, n_fft=2048, hop_length=None, win_length=None, target_sr=16000):
     """
-    从音频文件提取复数谱
+    Extract complex spectrogram from audio file
     
-    参数:
-        audio_path: 音频文件路径
-        n_fft: FFT窗口大小
-        hop_length: 帧移
-        win_length: 窗口长度，默认等于n_fft
+    Parameters:
+        audio_path: Path to audio file
+        n_fft: FFT window size
+        hop_length: Frame shift, if None it's automatically set to 10ms based on target_sr
+        win_length: Window length, defaults to n_fft
+        target_sr: Target sampling rate, default 16000Hz
         
-    返回:
-        复数谱的实部和虚部拼接后的向量
+    Returns:
+        Vector with concatenated real and imaginary parts of the complex spectrogram
     """
-    # 加载音频
+    # Load audio and resample to target sampling rate
     try:
-        audio, sr = librosa.load(audio_path, sr=None)
+        audio, sr = librosa.load(audio_path, sr=target_sr)
     except:
-        # 尝试使用soundfile加载（处理某些特殊格式）
+        # Try using soundfile for loading (handles some special formats)
         audio, sr = sf.read(audio_path)
-        # 如果是多通道，取第一个通道
+        # If multi-channel, take the first channel
         if len(audio.shape) > 1:
             audio = audio[:, 0]
+        # Resample to target sampling rate
+        if sr != target_sr:
+            audio = librosa.resample(audio, orig_sr=sr, target_sr=target_sr)
     
-    # 计算STFT
+    # If hop_length is not specified, set it to 10ms
+    if hop_length is None:
+        hop_length = int(target_sr * 0.01)  # 10ms
+    
+    # Calculate STFT
     complex_spec = librosa.stft(audio, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
     
-    # 提取实部和虚部
+    # Extract real and imaginary parts
     real_part = complex_spec.real
     imag_part = complex_spec.imag
     
-    # 将实部和虚部拼接成一个向量
-    # 先将每个时间帧处理成一个特征向量
+    # Concatenate real and imaginary parts into a vector
+    # First process each time frame into a feature vector
     feature_vectors = []
     for i in range(complex_spec.shape[1]):
-        # 提取当前时间帧的实部和虚部
+        # Extract real and imaginary parts for the current time frame
         frame_real = real_part[:, i]
         frame_imag = imag_part[:, i]
-        # 拼接实部和虚部
+        # Concatenate real and imaginary parts
         frame_features = np.concatenate([frame_real, frame_imag])
         feature_vectors.append(frame_features)
     
-    # 将所有时间帧的特征向量平均，得到一个表示整个音频的特征向量
-    # 根据需要，也可以返回所有时间帧的特征矩阵
+    # Return feature matrix for all time frames
     if len(feature_vectors) > 0:
         return np.array(feature_vectors)
     else:
-        # 处理极短的音频
+        # Handle extremely short audio
         return np.zeros((1, n_fft * 2))
 
 
-def process_audio_directory(input_dir, output_dir, n_fft=2048, hop_length=512):
-    """
-    处理整个音频目录，提取复数谱特征
+def main(args):
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
     
-    参数:
-        input_dir: 输入音频目录
-        output_dir: 输出特征目录
-        n_fft: FFT窗口大小
-        hop_length: 帧移
-    """
-    # 确保输出目录存在
-    os.makedirs(output_dir, exist_ok=True)
+    # Read file list
+    with open(args.flist, 'r') as f:
+        wav_files = [line.strip() for line in f.readlines()]
     
-    # 获取所有音频文件
-    audio_files = []
-    for root, _, files in os.walk(input_dir):
-        for file in files:
-            if file.endswith(('.wav', '.mp3', '.flac', '.ogg', '.m4a')):
-                audio_files.append(os.path.join(root, file))
+    print(f"Found {len(wav_files)} audio files")
+    print(f"Target sampling rate: {args.target_sr}Hz")
     
-    print(f"找到 {len(audio_files)} 个音频文件")
+    # If hop_length is not specified, calculate 10ms frame shift based on sampling rate
+    if args.hop_length is None:
+        hop_length = int(args.target_sr * 0.01)  # 10ms
+    else:
+        hop_length = args.hop_length
     
-    # 处理每个音频文件
-    for audio_path in tqdm(audio_files, desc="提取复数谱"):
+    print(f"Using parameters: target_sr={args.target_sr}Hz, hop_length={hop_length} samples ({hop_length/args.target_sr*1000:.1f}ms)")
+    
+    # Process each file
+    for wav_idx, wav_path in enumerate(tqdm(wav_files, desc="Extracting complex spectrogram")):
         try:
-            # 获取相对路径作为特征文件的基础名
-            rel_path = os.path.relpath(audio_path, input_dir)
-            # 替换扩展名为.npy
-            base_name = os.path.splitext(rel_path)[0]
-            # 替换路径分隔符为下划线
-            base_name = base_name.replace(os.path.sep, '_')
-            # 构建输出路径
-            output_path = os.path.join(output_dir, f"{base_name}_complex.npy")
+            # Get base filename
+            base_name = os.path.splitext(os.path.basename(wav_path))[0]
+            # Build output path, including sampling rate info
+            output_path = os.path.join(args.output_dir, f"{base_name}_complex_{args.target_sr//1000}k.npy")
             
-            # 提取特征
-            features = extract_complex_spectrogram(audio_path, n_fft, hop_length)
+            # Extract features
+            features = extract_complex_spectrogram(wav_path, args.n_fft, hop_length, target_sr=args.target_sr)
             
-            # 保存特征
+            # Save features
             np.save(output_path, features)
+            
+            # If this is the first successful file, print some information
+            if wav_idx == 0:
+                print(f"Complex spectrogram feature shape: {features.shape}")
+                print(f"Complex spectrogram feature type: {features.dtype}")
+                print(f"Feature dimension: {features.shape[1]} (real + imaginary)")
+                
         except Exception as e:
-            print(f"处理文件 {audio_path} 时出错: {e}")
-
-
-def main():
-    parser = argparse.ArgumentParser(description='从音频目录提取复数谱特征')
-    parser.add_argument('--input_dir', type=str, required=True, help='输入音频目录')
-    parser.add_argument('--output_dir', type=str, required=True, help='输出特征目录')
-    parser.add_argument('--n_fft', type=int, default=2048, help='FFT窗口大小')
-    parser.add_argument('--hop_length', type=int, default=512, help='帧移')
-    args = parser.parse_args()
+            print(f"Error processing {wav_path}: {e}")
+            import traceback
+            print(traceback.format_exc())
     
-    process_audio_directory(args.input_dir, args.output_dir, args.n_fft, args.hop_length)
-    print(f"复数谱特征提取完成，已保存到 {args.output_dir}")
+    print("Complex spectrogram feature extraction completed!")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description='Read audio files from filelist and extract complex spectrogram features')
+    parser.add_argument("--flist", type=str, required=True, 
+                        help="List file containing wav file paths")
+    parser.add_argument("--output_dir", type=str, required=True, 
+                        help="Directory for output npy files")
+    parser.add_argument('--n_fft', type=int, default=2048, 
+                        help='FFT window size')
+    parser.add_argument('--hop_length', type=int, default=None, 
+                        help='Frame shift, default is None which will automatically set to 10ms (calculated based on sampling rate)')
+    parser.add_argument('--target_sr', type=int, default=16000, 
+                        choices=[16000, 24000], help='Target sampling rate, supports 16000 or 24000Hz')
+    args = parser.parse_args()
+    
+    main(args)

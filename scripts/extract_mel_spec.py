@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-提取梅尔谱特征
+Extract Mel Spectrogram Features
 
-从音频目录提取梅尔谱特征并保存为npy文件。
+Reads audio file paths from filelist, extracts mel spectrogram features and saves them as npy files.
 """
 import os
 import argparse
@@ -12,123 +12,129 @@ from tqdm import tqdm
 import soundfile as sf
 
 
-def extract_mel_spectrogram(audio_path, sr=22050, n_fft=2048, hop_length=512, n_mels=128):
+def extract_mel_spectrogram(audio_path, target_sr=16000, n_fft=2048, hop_length=None, n_mels=128):
     """
-    从音频文件提取梅尔谱
+    Extract mel spectrogram from audio file
     
-    参数:
-        audio_path: 音频文件路径
-        sr: 采样率
-        n_fft: FFT窗口大小
-        hop_length: 帧移
-        n_mels: 梅尔滤波器数量
+    Parameters:
+        audio_path: Path to audio file
+        target_sr: Target sampling rate
+        n_fft: FFT window size
+        hop_length: Frame shift, if None it's automatically set to 10ms based on target_sr
+        n_mels: Number of mel filters
         
-    返回:
-        梅尔谱特征
+    Returns:
+        Mel spectrogram features
     """
-    # 加载音频
+    # Load audio and resample to target sampling rate
     try:
-        audio, sr = librosa.load(audio_path, sr=sr)
+        audio, sr = librosa.load(audio_path, sr=target_sr)
     except:
-        # 尝试使用soundfile加载（处理某些特殊格式）
-        audio, sr_orig = sf.read(audio_path)
-        # 如果是多通道，取第一个通道
+        # Try using soundfile for loading (handles some special formats)
+        audio, sr = sf.read(audio_path)
+        # If multi-channel, take the first channel
         if len(audio.shape) > 1:
             audio = audio[:, 0]
-        # 重采样到目标采样率
-        if sr_orig != sr:
-            audio = librosa.resample(audio, orig_sr=sr_orig, target_sr=sr)
+        # Resample to target sampling rate
+        if sr != target_sr:
+            audio = librosa.resample(audio, orig_sr=sr, target_sr=target_sr)
     
-    # 计算梅尔谱
+    # If hop_length is not specified, set it to 10ms
+    if hop_length is None:
+        hop_length = int(target_sr * 0.01)  # 10ms
+    
+    # Calculate mel spectrogram
     mel_spec = librosa.feature.melspectrogram(
         y=audio, 
-        sr=sr, 
+        sr=target_sr, 
         n_fft=n_fft, 
         hop_length=hop_length,
         n_mels=n_mels
     )
     
-    # 转换为分贝刻度 (更符合人类听觉)
+    # Convert to decibel scale (better for human perception)
     mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
     
-    # 将每个时间帧作为一个特征向量
+    # Use each time frame as a feature vector
     feature_vectors = []
     for i in range(mel_spec_db.shape[1]):
         feature_vectors.append(mel_spec_db[:, i])
     
-    # 将所有时间帧组成的矩阵返回
+    # Return matrix composed of all time frames
     if len(feature_vectors) > 0:
         return np.array(feature_vectors)
     else:
-        # 处理极短的音频
+        # Handle extremely short audio
         return np.zeros((1, n_mels))
 
 
-def process_audio_directory(input_dir, output_dir, sr=22050, n_fft=2048, hop_length=512, n_mels=128):
-    """
-    处理整个音频目录，提取梅尔谱特征
+def main(args):
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
     
-    参数:
-        input_dir: 输入音频目录
-        output_dir: 输出特征目录
-        sr: 采样率
-        n_fft: FFT窗口大小
-        hop_length: 帧移
-        n_mels: 梅尔滤波器数量
-    """
-    # 确保输出目录存在
-    os.makedirs(output_dir, exist_ok=True)
+    # Read file list
+    with open(args.flist, 'r') as f:
+        wav_files = [line.strip() for line in f.readlines()]
     
-    # 获取所有音频文件
-    audio_files = []
-    for root, _, files in os.walk(input_dir):
-        for file in files:
-            if file.endswith(('.wav', '.mp3', '.flac', '.ogg', '.m4a')):
-                audio_files.append(os.path.join(root, file))
+    print(f"Found {len(wav_files)} audio files")
+    print(f"Target sampling rate: {args.target_sr}Hz")
     
-    print(f"找到 {len(audio_files)} 个音频文件")
+    # If hop_length is not specified, calculate 10ms frame shift based on sampling rate
+    if args.hop_length is None:
+        hop_length = int(args.target_sr * 0.01)  # 10ms
+    else:
+        hop_length = args.hop_length
     
-    # 处理每个音频文件
-    for audio_path in tqdm(audio_files, desc="提取梅尔谱"):
+    print(f"Using parameters: target_sr={args.target_sr}Hz, hop_length={hop_length} samples ({hop_length/args.target_sr*1000:.1f}ms)")
+    
+    # Process each file
+    for wav_idx, wav_path in enumerate(tqdm(wav_files, desc="Extracting mel spectrogram")):
         try:
-            # 获取相对路径作为特征文件的基础名
-            rel_path = os.path.relpath(audio_path, input_dir)
-            # 替换扩展名为.npy
-            base_name = os.path.splitext(rel_path)[0]
-            # 替换路径分隔符为下划线
-            base_name = base_name.replace(os.path.sep, '_')
-            # 构建输出路径
-            output_path = os.path.join(output_dir, f"{base_name}_mel.npy")
+            # Get base filename
+            base_name = os.path.splitext(os.path.basename(wav_path))[0]
+            # Build output path, including sampling rate info
+            output_path = os.path.join(args.output_dir, f"{base_name}_mel_{args.target_sr//1000}k.npy")
             
-            # 提取特征
-            features = extract_mel_spectrogram(audio_path, sr, n_fft, hop_length, n_mels)
+            # Extract features
+            features = extract_mel_spectrogram(
+                wav_path, 
+                target_sr=args.target_sr, 
+                n_fft=args.n_fft, 
+                hop_length=hop_length, 
+                n_mels=args.n_mels
+            )
             
-            # 保存特征
+            # Save features
             np.save(output_path, features)
+            
+            # If this is the first successful file, print some information
+            if wav_idx == 0:
+                print(f"Mel spectrogram feature shape: {features.shape}")
+                print(f"Mel spectrogram feature type: {features.dtype}")
+                print(f"Number of mel filters: {args.n_mels}")
+                
         except Exception as e:
-            print(f"处理文件 {audio_path} 时出错: {e}")
-
-
-def main():
-    parser = argparse.ArgumentParser(description='从音频目录提取梅尔谱特征')
-    parser.add_argument('--input_dir', type=str, required=True, help='输入音频目录')
-    parser.add_argument('--output_dir', type=str, required=True, help='输出特征目录')
-    parser.add_argument('--sr', type=int, default=22050, help='采样率')
-    parser.add_argument('--n_fft', type=int, default=2048, help='FFT窗口大小')
-    parser.add_argument('--hop_length', type=int, default=512, help='帧移')
-    parser.add_argument('--n_mels', type=int, default=128, help='梅尔滤波器数量')
-    args = parser.parse_args()
+            print(f"Error processing {wav_path}: {e}")
+            import traceback
+            print(traceback.format_exc())
     
-    process_audio_directory(
-        args.input_dir, 
-        args.output_dir, 
-        args.sr, 
-        args.n_fft, 
-        args.hop_length, 
-        args.n_mels
-    )
-    print(f"梅尔谱特征提取完成，已保存到 {args.output_dir}")
+    print("Mel spectrogram feature extraction completed!")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description='Read audio files from filelist and extract mel spectrogram features')
+    parser.add_argument("--flist", type=str, required=True, 
+                        help="List file containing wav file paths")
+    parser.add_argument("--output_dir", type=str, required=True, 
+                        help="Directory for output npy files")
+    parser.add_argument('--target_sr', type=int, default=16000, 
+                        choices=[16000, 24000], help='Target sampling rate, supports 16000 or 24000Hz')
+    parser.add_argument('--n_fft', type=int, default=2048, 
+                        help='FFT window size')
+    parser.add_argument('--hop_length', type=int, default=None, 
+                        help='Frame shift, default is None which will automatically set to 10ms (calculated based on sampling rate)')
+    parser.add_argument('--n_mels', type=int, default=128, 
+                        help='Number of mel filters')
+    args = parser.parse_args()
+    
+    main(args)

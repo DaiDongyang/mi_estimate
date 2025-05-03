@@ -1,34 +1,68 @@
-# config.yaml - MINE 训练配置
+# config.yaml - MINE Training Configuration Example
 data:
-  train_csv: "/root/autodl-tmp/datasets/ljspeech/features/csv/mel_complex_csv/train.csv"
-  valid_csv: "/root/autodl-tmp/datasets/ljspeech/features/csv/mel_complex_csv/valid.csv"
-  test_csv: "/root/autodl-tmp/datasets/ljspeech/features/csv/mel_complex_csv/test.csv"
-  features_dir: "/root/autodl-tmp/datasets/ljspeech/features/csv/mel_complex_csv"
-  segment_length: 200       # 裁剪的序列长度
-  normalization: 'standard' # Float 特征归一化: none, minmax, standard, robust
+  # Data paths
+  train_csv: "/path/to/datasets/features/csv/train.csv"
+  valid_csv: "/path/to/datasets/features/csv/valid.csv"
+  test_csv: "/path/to/datasets/features/csv/test.csv"
+  features_dir: "/path/to/datasets/features/csv"
+  
+  # Feature parameters
+  segment_length: 200       # Cropped sequence length
+  normalization: 'standard' # Float feature normalization: none, minmax, standard, robust
+  
+  # Upsampling factors - supports different sampling rates between x and y
+  x_repeat: 2               # Repeat factor for x features (upsampling), e.g., 10ms -> 20ms
+  y_repeat: 1               # Repeat factor for y features, leave at 1 if no upsampling needed
+  
+  # Maximum allowed difference between x and y lengths after repeat
+  # Samples exceeding this difference will be filtered out
+  max_length_diff: 5        # Max absolute difference between x_length and y_length
 
 model:
-  # --- 选择网络类型 ---
-  # network_type: 'float'     # 如果 x 和 y 都是 float 特征
-  network_type: 'float'     # 如果 x 是 index (long), y 是 float
-
-  # --- 如果 network_type is 'index', 需要下面两个参数 ---
-  vocab_size: 5000          # 示例: X 的词汇表大小 (!!!根据你的数据修改!!!)
-  embedding_dim: 256        # 示例: X 的 Embedding 维度
-
-  # --- 通用 MLP 参数 ---
-  hidden_dims: [16] # 网络隐藏层维度
-  activation: 'relu'        # 激活函数: relu, leaky_relu, elu
-  batch_norm: True          # 是否使用 BatchNorm
-  dropout: 0.1              # Dropout 率 (0 表示不用)
+  # Feature types - various combinations are supported:
+  # Option 1: Both floating point features
+  x_type: 'float'          # Source features are continuous (float)
+  y_type: 'float'          # Target features are continuous (float)
+  
+  # Option 2: Source is index, target is float
+  # x_type: 'index'        # Source features are discrete indices (long)
+  # y_type: 'float'        # Target features are continuous (float)
+  
+  # Option 3: Source is float, target is index
+  # x_type: 'float'        # Source features are continuous (float)
+  # y_type: 'index'        # Target features are discrete indices (long)
+  
+  # Option 4: Both index features
+  # x_type: 'index'        # Source features are discrete indices (long)
+  # y_type: 'index'        # Target features are discrete indices (long)
+  
+  # --- Feature dimensions (for float type) ---
+  # You can specify these explicitly or let them be detected from data
+  x_dim: 20                # Dimension of x features when x_type='float'
+  y_dim: 40                # Dimension of y features when y_type='float'
+  
+  # --- Required parameters for index features ---
+  # Vocabulary size and embedding dimension for x (required when x_type='index')
+  x_vocab_size: 5000       # Size of vocabulary for x 
+  x_embedding_dim: 256     # Embedding dimension for x
+  
+  # Vocabulary size and embedding dimension for y (required when y_type='index')
+  y_vocab_size: 2000       # Size of vocabulary for y
+  y_embedding_dim: 128     # Embedding dimension for y
+  
+  # --- Neural network architecture ---
+  hidden_dims: [512, 256]  # Network hidden layer dimensions
+  activation: 'relu'       # Activation function: relu, leaky_relu, elu
+  batch_norm: True         # Whether to use BatchNorm
+  dropout: 0.1             # Dropout rate (0 means none)
 
 training:
-  epochs: 500               # 训练轮数
-  batch_size: 128            # 批次大小
-  lr: 0.0001                # 学习率
-  device: 'cuda'            # 使用 'cuda' 或 'cpu'
-  num_workers: 16            # 数据加载进程数 (根据你的机器调整)
-  seed: 42                  # 随机种子
+  epochs: 100              # Number of training epochs
+  batch_size: 128          # Batch size
+  lr: 0.0001               # Learning rate
+  device: 'cuda'           # Use 'cuda' or 'cpu'
+  num_workers: 16          # Number of data loading processes
+  seed: 42                 # Random seed
 
 logging:
-  log_interval: 1          # 每隔多少 epoch 打印一次详细统计信息
+  log_interval: 5          # Print detailed statistics every this many epochs

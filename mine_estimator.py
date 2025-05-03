@@ -1,60 +1,89 @@
 # mine_estimator.py
 """
-MINE 互信息估计器
+MINE mutual information estimator
 """
 import torch
 import torch.optim as optim
 import numpy as np
-# 导入两个网络类
-from mine_network import MINENetworkFloat, MINENetworkIndex
+# Import network classes
+from mine_network import (
+    MINENetworkFloatFloat, 
+    MINENetworkIndexFloat, 
+    MINENetworkFloatIndex,
+    MINENetworkIndexIndex
+)
 
 class MINE:
-    """使用神经网络估计互信息 I(X;Y)"""
+    """Mutual Information Neural Estimator for I(X;Y)"""
 
-    def __init__(self, x_dim=None, y_dim=None, network_type='float',
-                 vocab_size=None, embedding_dim=None,
-                 hidden_dims=[128,64],
-                 activation="relu", batch_norm=True, dropout=0.1,
+    def __init__(self, x_type='float', y_type='float',
+                 x_dim=None, y_dim=None,
+                 x_vocab_size=None, x_embedding_dim=None,
+                 y_vocab_size=None, y_embedding_dim=None,
+                 hidden_dims=[128, 64], activation="relu", 
+                 batch_norm=True, dropout=0.1,
                  lr=1e-4, device="cuda"):
         """
-        初始化MINE估计器
-
-        参数:
-            x_dim: X 的特征维度 (当 network_type='float' 时需要)
-            y_dim: Y 的特征维度 (始终需要)
-            network_type: 网络类型 ('float' 或 'index')
-            vocab_size: X 的词汇表大小 (当 network_type='index' 时需要)
-            embedding_dim: X 的 Embedding 维度 (当 network_type='index' 时需要)
-            hidden_dims: MINE网络隐藏层维度列表
-            activation: 激活函数
-            batch_norm: 是否使用批归一化
-            dropout: Dropout率
-            lr: 学习率
-            device: 设备 ('cuda' or 'cpu')
+        Initialize MINE estimator
+        
+        Args:
+            x_type: Type of X feature ('float' or 'index')
+            y_type: Type of Y feature ('float' or 'index')
+            x_dim: X feature dimension (required when x_type='float')
+            y_dim: Y feature dimension (required when y_type='float')
+            x_vocab_size: X vocabulary size (required when x_type='index')
+            x_embedding_dim: X embedding dimension (required when x_type='index')
+            y_vocab_size: Y vocabulary size (required when y_type='index')
+            y_embedding_dim: Y embedding dimension (required when y_type='index')
+            hidden_dims: List of hidden layer dimensions for MINE network
+            activation: Activation function
+            batch_norm: Whether to use batch normalization
+            dropout: Dropout rate
+            lr: Learning rate
+            device: Device ('cuda' or 'cpu')
         """
         self.device = device if torch.cuda.is_available() and device == "cuda" else "cpu"
         print(f"MINE Estimator using device: {self.device}")
-        self.network_type = network_type
+        self.x_type = x_type
+        self.y_type = y_type
 
-        # --- 创建 MINE 网络 ---
-        if self.network_type == 'float':
+        # --- Create appropriate MINE network based on feature types ---
+        if x_type == 'float' and y_type == 'float':
             if x_dim is None or y_dim is None:
-                raise ValueError("x_dim and y_dim must be provided for network_type 'float'")
-            print(f"Initializing MINENetworkFloat (x_dim={x_dim}, y_dim={y_dim})")
-            self.mine_net = MINENetworkFloat(
+                raise ValueError("x_dim and y_dim must be provided for x_type='float' and y_type='float'")
+            print(f"Initializing MINENetworkFloatFloat (x_dim={x_dim}, y_dim={y_dim})")
+            self.mine_net = MINENetworkFloatFloat(
                 x_dim, y_dim, hidden_dims, activation, batch_norm, dropout
             ).to(self.device)
-        elif self.network_type == 'index':
-            if vocab_size is None or embedding_dim is None or y_dim is None:
-                raise ValueError("vocab_size, embedding_dim, and y_dim must be provided for network_type 'index'")
-            print(f"Initializing MINENetworkIndex (vocab={vocab_size}, embed_dim={embedding_dim}, y_dim={y_dim})")
-            self.mine_net = MINENetworkIndex(
-                vocab_size, embedding_dim, y_dim, hidden_dims, activation, batch_norm, dropout
+            
+        elif x_type == 'index' and y_type == 'float':
+            if x_vocab_size is None or x_embedding_dim is None or y_dim is None:
+                raise ValueError("x_vocab_size, x_embedding_dim, and y_dim must be provided for x_type='index' and y_type='float'")
+            print(f"Initializing MINENetworkIndexFloat (x_vocab={x_vocab_size}, x_embed_dim={x_embedding_dim}, y_dim={y_dim})")
+            self.mine_net = MINENetworkIndexFloat(
+                x_vocab_size, x_embedding_dim, y_dim, hidden_dims, activation, batch_norm, dropout
             ).to(self.device)
+            
+        elif x_type == 'float' and y_type == 'index':
+            if x_dim is None or y_vocab_size is None or y_embedding_dim is None:
+                raise ValueError("x_dim, y_vocab_size, and y_embedding_dim must be provided for x_type='float' and y_type='index'")
+            print(f"Initializing MINENetworkFloatIndex (x_dim={x_dim}, y_vocab={y_vocab_size}, y_embed_dim={y_embedding_dim})")
+            self.mine_net = MINENetworkFloatIndex(
+                x_dim, y_vocab_size, y_embedding_dim, hidden_dims, activation, batch_norm, dropout
+            ).to(self.device)
+            
+        elif x_type == 'index' and y_type == 'index':
+            if x_vocab_size is None or x_embedding_dim is None or y_vocab_size is None or y_embedding_dim is None:
+                raise ValueError("x_vocab_size, x_embedding_dim, y_vocab_size, and y_embedding_dim must be provided for x_type='index' and y_type='index'")
+            print(f"Initializing MINENetworkIndexIndex (x_vocab={x_vocab_size}, x_embed_dim={x_embedding_dim}, y_vocab={y_vocab_size}, y_embed_dim={y_embedding_dim})")
+            self.mine_net = MINENetworkIndexIndex(
+                x_vocab_size, x_embedding_dim, y_vocab_size, y_embedding_dim, hidden_dims, activation, batch_norm, dropout
+            ).to(self.device)
+            
         else:
-            raise ValueError(f"Unknown network_type: {self.network_type}. Choose 'float' or 'index'.")
+            raise ValueError(f"Unsupported feature types: x_type={x_type}, y_type={y_type}. Choose 'float' or 'index'.")
 
-        # 优化器
+        # Optimizer
         self.optimizer = optim.Adam(
             self.mine_net.parameters(),
             lr=lr,
@@ -62,58 +91,72 @@ class MINE:
             weight_decay=1e-4
         )
 
-        # 学习率调度器 (可选, 但推荐)
+        # Learning rate scheduler (optional, but recommended)
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer, T_max=100, eta_min=lr / 10
         )
 
-        # 训练历史记录
+        # Training history
         self.train_mi_history = []
         self.val_mi_history = []
         self.best_val_mi = float('-inf')
 
-        # 诊断信息
+        # Diagnostic information
         self.recent_t_values = []
         self.gradient_norms = []
 
     def compute_mutual_info(self, x_joint, y_joint):
         """
-        计算互信息估计 (Donsker-Varadhan lower bound)
-
-        参数:
-            x_joint: 联合分布 X 样本, 形状 [B, S, Dx] (float) 或 [B, S] (long)
-            y_joint: 联合分布 Y 样本, 形状 [B, S, Dy] (float)
-
-        返回:
-            互信息估计值 (标量 Tensor)
+        Compute mutual information estimate (Donsker-Varadhan lower bound)
+        
+        Args:
+            x_joint: Joint distribution X samples, shape [B, S, Dx] (float) or [B, S] (long)
+            y_joint: Joint distribution Y samples, shape [B, S, Dy] (float) or [B, S] (long)
+            
+        Returns:
+            Mutual information estimate (scalar Tensor)
         """
-        # --- 1. 生成 y_marginal ---
-        # 通过在 N=B*S 维度上 shuffle y_joint 来生成边缘样本 y'
-        if y_joint.ndim == 3: # [B, S, Dy]
+        # --- 1. Generate y_marginal ---
+        # Create marginal samples y' by shuffling y_joint along the N=B*S dimension
+        if y_joint.dim() == 3:  # [B, S, Dy]
             B, S, Dy = y_joint.shape
             N = B * S
             y_joint_flat = y_joint.reshape(N, Dy)
             shuffle_idx = torch.randperm(N).to(self.device)
             y_marginal_flat = y_joint_flat[shuffle_idx]
-            # 将 y_marginal reshape 回原始形状，因为 self.mine_net.forward 期望原始形状
+            # Reshape y_marginal back to original shape
             y_marginal = y_marginal_flat.reshape(B, S, Dy)
-        elif y_joint.ndim == 2: # [B, Dy] - 非序列情况
+        elif y_joint.dim() == 2 and self.y_type == 'float':  # [B, Dy] - non-sequential case
             N = y_joint.shape[0]
             shuffle_idx = torch.randperm(N).to(self.device)
             y_marginal = y_joint[shuffle_idx]
-            # 检查 x 的维度是否匹配
-            if x_joint.ndim != (1 if self.network_type == 'index' else 2) or x_joint.shape[0] != N:
-                 raise ValueError("Shape mismatch between x_joint and y_joint for non-sequential case")
+            # Check if x dimensions match
+            if not (x_joint.dim() == 2 and x_joint.shape[0] == N) and not (x_joint.dim() == 1 and x_joint.shape[0] == N):
+                raise ValueError("Shape mismatch between x_joint and y_joint for non-sequential case")
+        elif y_joint.dim() == 2 and self.y_type == 'index':  # [B, S] - sequential indices
+            B, S = y_joint.shape
+            N = B * S
+            y_joint_flat = y_joint.reshape(N)
+            shuffle_idx = torch.randperm(N).to(self.device)
+            y_marginal_flat = y_joint_flat[shuffle_idx]
+            # Reshape y_marginal back to original shape
+            y_marginal = y_marginal_flat.reshape(B, S)
+        elif y_joint.dim() == 1:  # [B] - non-sequential indices
+            N = y_joint.shape[0]
+            shuffle_idx = torch.randperm(N).to(self.device)
+            y_marginal = y_joint[shuffle_idx]
+            # Check if x dimensions match
+            if not (x_joint.dim() == 1 and x_joint.shape[0] == N) and not (x_joint.dim() == 2 and x_joint.shape[0] == N):
+                raise ValueError("Shape mismatch between x_joint and y_joint for non-sequential case")
         else:
-             raise ValueError(f"Unsupported y_joint dimension: {y_joint.ndim}")
+            raise ValueError(f"Unsupported y_joint dimension: {y_joint.dim()}")
 
-
-        # --- 2. 计算网络输出 ---
-        # 网络 forward 方法内部会处理 reshape，返回 [N, 1]
+        # --- 2. Compute network outputs ---
+        # The network forward method handles reshaping internally, returns [N, 1]
         t_joint = self.mine_net(x_joint, y_joint)
-        t_marginal = self.mine_net(x_joint, y_marginal) # 使用原始 x 和 shuffle 后的 y
+        t_marginal = self.mine_net(x_joint, y_marginal)  # Use original x with shuffled y
 
-        # --- 诊断信息 ---
+        # --- Diagnostic information ---
         self.recent_t_values.append({
             'joint_mean': t_joint.mean().item(),
             'joint_std': t_joint.std().item(),
@@ -122,16 +165,16 @@ class MINE:
         })
         if len(self.recent_t_values) > 50:
             self.recent_t_values.pop(0)
-        # --- 诊断信息结束 ---
+        # --- End diagnostic information ---
 
-        # --- 3. 计算 MI lower bound ---
-        # E_P[T] - log(E_Q[e^T])，其中 P 是联合分布，Q 是边缘分布的乘积
+        # --- 3. Compute MI lower bound ---
+        # E_P[T] - log(E_Q[e^T]), where P is joint distribution, Q is product of marginals
         e_joint = torch.mean(t_joint)
 
-        # 使用 logsumexp 技巧提高数值稳定性计算 log(E_Q[e^T])
+        # Use logsumexp trick for numerical stability in computing log(E_Q[e^T])
         max_t = torch.max(t_marginal).detach()
         log_e_marginal = max_t + torch.log(
-            torch.mean(torch.exp(t_marginal - max_t)) + 1e-8 # 加小 epsilon 防 log(0)
+            torch.mean(torch.exp(t_marginal - max_t)) + 1e-8  # Add small epsilon to prevent log(0)
         )
 
         mi_estimate = e_joint - log_e_marginal
@@ -139,54 +182,56 @@ class MINE:
 
     def train_batch(self, x_joint_orig, y_joint_orig):
         """
-        用单个批次训练 MINE 网络
-
-        参数:
-            x_joint_orig: 原始联合 X 样本 (float or long)
-            y_joint_orig: 原始联合 Y 样本 (float)
-
-        返回:
-            该批次的 MI 估计值 (float), 损失值 (float)
+        Train MINE network on a single batch
+        
+        Args:
+            x_joint_orig: Original joint X samples
+            y_joint_orig: Original joint Y samples
+            
+        Returns:
+            MI estimate for this batch (float), loss value (float)
         """
         self.mine_net.train()
 
-        # 移动数据到设备并确保类型正确
-        # y 始终是 float
-        y_joint = y_joint_orig.float().to(self.device)
-        # x 根据网络类型确定类型
-        if self.network_type == 'index':
-            x_joint = x_joint_orig.long().to(self.device) # 确保是 LongTensor
+        # Move data to device and ensure correct types
+        if self.x_type == 'index':
+            x_joint = x_joint_orig.long().to(self.device)  # Ensure long tensor
         else:
-            x_joint = x_joint_orig.float().to(self.device)
+            x_joint = x_joint_orig.float().to(self.device)  # Ensure float tensor
+            
+        if self.y_type == 'index':
+            y_joint = y_joint_orig.long().to(self.device)  # Ensure long tensor
+        else:
+            y_joint = y_joint_orig.float().to(self.device)  # Ensure float tensor
 
-        # 计算 MI (内部会生成 y_marginal 并调用 forward)
+        # Compute MI (will generate y_marginal internally and call forward)
         mi_estimate = self.compute_mutual_info(x_joint, y_joint)
 
-        # 损失函数: 最大化 MI 等价于最小化 -MI
+        # Loss function: maximizing MI is equivalent to minimizing -MI
         loss = -mi_estimate
 
-        # 反向传播和优化
+        # Backpropagation and optimization
         self.optimizer.zero_grad()
         loss.backward()
 
-        # 梯度裁剪 (防止梯度爆炸)
+        # Gradient clipping (prevent gradient explosion)
         grad_norm = torch.nn.utils.clip_grad_norm_(
             self.mine_net.parameters(), max_norm=1.0
         )
         self.gradient_norms.append(grad_norm.item())
-        if len(self.gradient_norms) > 100: # 只保留最近的梯度范数
+        if len(self.gradient_norms) > 100:  # Only keep recent gradient norms
             self.gradient_norms.pop(0)
 
         self.optimizer.step()
 
-        # 检查是否有 NaN 或 Inf (有助于调试)
+        # Check for NaN or Inf (helpful for debugging)
         if torch.isnan(loss) or torch.isinf(loss):
-             print(f"警告: 损失值出现 NaN 或 Inf!")
+            print(f"Warning: Loss value is NaN or Inf!")
 
         return mi_estimate.item(), loss.item()
 
     def train_epoch(self, train_loader):
-        """训练一个 epoch"""
+        """Train for one epoch"""
         self.mine_net.train()
         epoch_mi = []
         total_loss = 0.0
@@ -198,12 +243,12 @@ class MINE:
                 epoch_mi.append(mi_value)
                 total_loss += loss_value
             else:
-                print(f"警告: Batch {batch_idx} 产生无效 MI/Loss 值，已跳过。")
+                print(f"Warning: Batch {batch_idx} produced invalid MI/Loss values, skipped.")
 
             if abs(mi_value) > 100 and not np.isnan(mi_value):
-                 print(f"警告: Batch {batch_idx} MI 值异常: {mi_value:.4f}")
+                print(f"Warning: Batch {batch_idx} has abnormal MI value: {mi_value:.4f}")
 
-        # 更新学习率
+        # Update learning rate
         self.scheduler.step()
 
         avg_mi = np.mean(epoch_mi) if epoch_mi else 0.0
@@ -213,20 +258,24 @@ class MINE:
         return avg_mi, avg_loss
 
     def evaluate(self, data_loader):
-        """在验证集或测试集上评估模型"""
+        """Evaluate model on validation or test set"""
         self.mine_net.eval()
         eval_mi = []
 
         with torch.no_grad():
             for batch_x, batch_y in data_loader:
-                # 移动数据到设备并确保类型正确
-                y_joint = batch_y.float().to(self.device)
-                if self.network_type == 'index':
+                # Move data to device and ensure correct types
+                if self.x_type == 'index':
                     x_joint = batch_x.long().to(self.device)
                 else:
                     x_joint = batch_x.float().to(self.device)
+                    
+                if self.y_type == 'index':
+                    y_joint = batch_y.long().to(self.device)
+                else:
+                    y_joint = batch_y.float().to(self.device)
 
-                # 计算 MI
+                # Compute MI
                 mi_estimate = self.compute_mutual_info(x_joint, y_joint)
 
                 if not np.isnan(mi_estimate.item()) and not np.isinf(mi_estimate.item()):
@@ -236,20 +285,20 @@ class MINE:
         return avg_mi
 
     def validate(self, val_loader):
-        """执行验证步骤并更新最佳 MI"""
+        """Perform validation step and update best MI"""
         avg_val_mi = self.evaluate(val_loader)
         self.val_mi_history.append(avg_val_mi)
 
         if avg_val_mi > self.best_val_mi:
             self.best_val_mi = avg_val_mi
             print(f"  * New best validation MI: {self.best_val_mi:.4f}")
-            # 保存模型
+            # Save model
             # torch.save(self.mine_net.state_dict(), 'best_mine_model.pth')
 
         return avg_val_mi
 
     def get_network_stats(self):
-        """返回网络状态的诊断信息"""
+        """Return diagnostic information about network state"""
         if not self.recent_t_values:
             return "No statistics recorded yet."
 

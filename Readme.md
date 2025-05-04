@@ -61,7 +61,7 @@ Repeat this for train, validation, and test sets.
 
 ### 4. Configure the Model
 
-Modify the config.yaml file based on your feature types. Below is an example configuration for calculating mutual information between EnCodec S3 tokens and complex spectrograms:
+Modify the config.yaml file based on your feature types. Below is an example configuration for calculating mutual information between Cosyvoice S3 tokens and complex spectrograms:
 
 ```yaml
 # config.yaml - MINE Training Configuration Example

@@ -1,6 +1,5 @@
-# train.py
 """
-Main script for training MINE model
+Main script for training MINE model with checkpoint saving functionality
 """
 import torch
 import yaml
@@ -12,6 +11,61 @@ from tqdm import tqdm  # For progress bar
 # Import modules from same directory or Python path
 from mine_estimator import MINE
 from dataset import create_data_loaders
+
+def save_checkpoint(mine_model, epoch, best_val_mi, checkpoint_dir, filename):
+    """
+    Save model checkpoint
+    
+    Args:
+        mine_model: MINE model instance
+        epoch: Current epoch
+        best_val_mi: Best validation MI value
+        checkpoint_dir: Directory to save checkpoints
+        filename: Checkpoint filename
+    """
+    # Create checkpoint directory if it doesn't exist
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # Prepare checkpoint data
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': mine_model.mine_net.state_dict(),
+        'optimizer_state_dict': mine_model.optimizer.state_dict(),
+        'scheduler_state_dict': mine_model.scheduler.state_dict(),
+        'best_val_mi': best_val_mi,
+        'train_mi_history': mine_model.train_mi_history,
+        'val_mi_history': mine_model.val_mi_history,
+    }
+    
+    # Save checkpoint
+    checkpoint_path = os.path.join(checkpoint_dir, filename)
+    torch.save(checkpoint, checkpoint_path)
+    print(f"Checkpoint saved to {checkpoint_path}")
+    
+    return checkpoint_path
+
+def load_checkpoint(mine_model, checkpoint_path):
+    """
+    Load model checkpoint
+    
+    Args:
+        mine_model: MINE model instance
+        checkpoint_path: Path to checkpoint file
+        
+    Returns:
+        epoch: Last saved epoch
+        best_val_mi: Best validation MI from checkpoint
+    """
+    checkpoint = torch.load(checkpoint_path, map_location=mine_model.device)
+    
+    mine_model.mine_net.load_state_dict(checkpoint['model_state_dict'])
+    mine_model.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    mine_model.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    mine_model.train_mi_history = checkpoint['train_mi_history']
+    mine_model.val_mi_history = checkpoint['val_mi_history']
+    mine_model.best_val_mi = checkpoint['best_val_mi']
+    
+    return checkpoint['epoch'], checkpoint['best_val_mi']
 
 def main(config_path):
     """Main training function, takes configuration file path as parameter"""
@@ -34,6 +88,12 @@ def main(config_path):
     model_config = config.get('model', {})
     train_config = config.get('training', {})
     log_config = config.get('logging', {})
+    
+    # Checkpoint configuration
+    checkpoint_config = config.get('checkpoint', {})
+    checkpoint_dir = checkpoint_config.get('dir', './checkpoints')
+    checkpoint_interval = checkpoint_config.get('save_interval', 10)
+    resume_training = checkpoint_config.get('resume_from', None)
 
     # --- 2. Create data loaders and get dimensions ---
     try:
@@ -116,7 +176,21 @@ def main(config_path):
         print(f"Error: Failed to initialize MINE model - {e}")
         return
 
-    # --- 4. Training loop ---
+    # --- 4. Resume from checkpoint if specified ---
+    start_epoch = 1
+    best_epoch = -1
+    if resume_training:
+        try:
+            print(f"Resuming training from checkpoint: {resume_training}")
+            loaded_epoch, loaded_best_val_mi = load_checkpoint(mine_model, resume_training)
+            start_epoch = loaded_epoch + 1
+            print(f"Resumed from epoch {loaded_epoch} with best validation MI: {loaded_best_val_mi:.6f}")
+            best_epoch = loaded_epoch if loaded_best_val_mi == mine_model.best_val_mi else best_epoch
+        except Exception as e:
+            print(f"Error loading checkpoint: {e}")
+            print("Starting training from scratch instead.")
+    
+    # --- 5. Training loop ---
     epochs = train_config.get('epochs', 100)
     log_interval = log_config.get('log_interval', 10)  # Adjust print interval
 
@@ -124,12 +198,19 @@ def main(config_path):
     print(f"Starting MINE model training (x_type: {x_type}, y_type: {y_type})")
     print(f"Total Epochs: {epochs}")
     print(f"Using device: {mine_model.device}")
+    print(f"Checkpoints will be saved to: {checkpoint_dir}")
+    print(f"Checkpoint save interval: {checkpoint_interval} epochs")
     print("="*30 + "\n")
 
-    start_time = time.time()
-    best_epoch = -1
+    # Create checkpoint directory if it doesn't exist
+    os.makedirs(checkpoint_dir, exist_ok=True)
 
-    for epoch in range(1, epochs + 1):
+    start_time = time.time()
+    
+    # Track best validation performance for saving best model
+    best_checkpoint_path = None
+
+    for epoch in range(start_epoch, epochs + 1):
         epoch_start_time = time.time()
 
         # --- Training ---
@@ -152,10 +233,23 @@ def main(config_path):
             # Check if new best validation MI
             if mine_model.best_val_mi == avg_val_mi and avg_val_mi != float('-inf'):
                 best_epoch = epoch
+                # Save best model checkpoint
+                best_checkpoint_path = save_checkpoint(
+                    mine_model, epoch, mine_model.best_val_mi, 
+                    checkpoint_dir, f"best_model.pth"
+                )
+                print(f"  * New best model saved at epoch {epoch}!")
         except Exception as e:
             print(f"\nError: Error occurred during validation Epoch {epoch} - {e}")
             print("Will skip validation and logging for this Epoch.")
             continue  # Go to next epoch
+
+        # --- Save periodic checkpoint ---
+        if epoch % checkpoint_interval == 0:
+            save_checkpoint(
+                mine_model, epoch, mine_model.best_val_mi,
+                checkpoint_dir, f"checkpoint_epoch_{epoch}.pth"
+            )
 
         epoch_time = time.time() - epoch_start_time
 
@@ -171,17 +265,32 @@ def main(config_path):
             print(stats_info if isinstance(stats_info, str) else "\n".join([f"  {k}: {v}" for k, v in stats_info.items()]))
             print("-" * (40 + len(f" Epoch {epoch} Stats ")))
 
+    # Save final checkpoint
+    save_checkpoint(
+        mine_model, epochs, mine_model.best_val_mi,
+        checkpoint_dir, f"final_model_epoch_{epochs}.pth"
+    )
+
     total_training_time = time.time() - start_time
     print("\n" + "="*30)
     print("Training complete")
     print(f"Total training time: {total_training_time:.2f}s ({total_training_time/60:.2f} minutes)")
     print(f"Best validation MI: {mine_model.best_val_mi:.6f} (achieved at Epoch {best_epoch})")
+    print(f"Best model checkpoint saved at: {best_checkpoint_path}")
     print("="*30 + "\n")
 
-    # --- 5. Testing ---
-    # Typically use best validation model for testing, if saved would need to load
-    # Here we just evaluate the final model
-    print("Evaluating final model on test set...")
+    # --- 6. Testing ---
+    # Load the best model for evaluation if available
+    if best_checkpoint_path and os.path.exists(best_checkpoint_path):
+        print(f"Loading best model from {best_checkpoint_path} for testing...")
+        try:
+            _, _ = load_checkpoint(mine_model, best_checkpoint_path)
+            print("Best model loaded successfully.")
+        except Exception as e:
+            print(f"Error loading best model: {e}")
+            print("Using final model for testing instead.")
+
+    print("Evaluating on test set...")
     try:
         test_mi = mine_model.evaluate(test_loader)
         print(f"Test set MI: {test_mi:.6f}")
@@ -258,6 +367,11 @@ training:
   device: 'cuda'            # Use 'cuda' or 'cpu'
   num_workers: 4            # Number of data loading processes (adjust for your machine)
   seed: 42                  # Random seed
+
+checkpoint:
+  dir: './checkpoints'      # Directory to save checkpoints
+  save_interval: 10         # Save checkpoint every N epochs
+  resume_from: null         # Path to checkpoint to resume from (null to start from scratch)
 
 logging:
   log_interval: 10          # Print detailed statistics every this many epochs

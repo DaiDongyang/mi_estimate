@@ -14,12 +14,11 @@ import yaml  # For loading config
 class MIDataset(Dataset):
     """Mutual Information dataset, loads preprocessed feature files"""
 
-    def __init__(self, csv_path, features_dir, segment_length=100,
+    def __init__(self, csv_path, features_dir, segment_length=None,
                  normalization='standard', seed=42, 
                  x_type='float', y_type='float',
                  x_repeat=1, y_repeat=1,
-                 max_length_diff=5,
-                 x_dim=None, y_dim=None):  # Added configurable dimensions
+                 x_dim=None, y_dim=None):  # Removed max_length_diff parameter
         """
         Initialize dataset
         
@@ -33,7 +32,6 @@ class MIDataset(Dataset):
             y_type: Type of y features ('float' or 'index') 
             x_repeat: Repeat factor for x features
             y_repeat: Repeat factor for y features
-            max_length_diff: Maximum allowed difference between x and y lengths
             x_dim: Feature dimension for x (when x_type='float')
             y_dim: Feature dimension for y (when y_type='float')
         """
@@ -44,7 +42,7 @@ class MIDataset(Dataset):
         self.y_type = y_type
         self.x_repeat = x_repeat
         self.y_repeat = y_repeat
-        self.max_length_diff = max_length_diff
+        # max_length_diff is no longer needed as we use max(self.x_repeat, self.y_repeat) instead
         
         # Set appropriate dtypes based on feature types
         self.x_dtype = torch.long if x_type == 'index' else torch.float32
@@ -107,40 +105,40 @@ class MIDataset(Dataset):
 
         except FileNotFoundError:
             print(f"Error: File not found - x: {x_path} or y: {y_path}")
-            # Return placeholder data
+            # Return placeholder data with zeros
             dummy_dim_x = self._x_dim if self._x_dim else 10
             dummy_dim_y = self._y_dim if self._y_dim else 10
             
-            # Create appropriate shaped placeholders based on feature types
+            # Create zero-filled placeholders based on feature types
             if self.x_type == 'index':
-                x_feature = np.random.randint(0, 100, size=(self.segment_length,)).astype(np.int64)
+                x_feature = np.zeros((self.segment_length,), dtype=np.int64)
             else:
-                x_feature = np.random.randn(self.segment_length, dummy_dim_x).astype(np.float32)
+                x_feature = np.zeros((self.segment_length, dummy_dim_x), dtype=np.float32)
                 
             if self.y_type == 'index':
-                y_feature = np.random.randint(0, 100, size=(self.segment_length,)).astype(np.int64)
+                y_feature = np.zeros((self.segment_length,), dtype=np.int64)
             else:
-                y_feature = np.random.randn(self.segment_length, dummy_dim_y).astype(np.float32)
+                y_feature = np.zeros((self.segment_length, dummy_dim_y), dtype=np.float32)
                 
         except Exception as e:
             print(f"Error loading feature files (idx: {idx}): {e}")
             print(f"  X: {x_path}")
             print(f"  Y: {y_path}")
             
-            # Return placeholder data
+            # Return placeholder data with zeros
             dummy_dim_x = self._x_dim if self._x_dim else 10
             dummy_dim_y = self._y_dim if self._y_dim else 10
             
-            # Create appropriate shaped placeholders based on feature types
+            # Create zero-filled placeholders based on feature types
             if self.x_type == 'index':
-                x_feature = np.random.randint(0, 100, size=(self.segment_length,)).astype(np.int64)
+                x_feature = np.zeros((self.segment_length,), dtype=np.int64)
             else:
-                x_feature = np.random.randn(self.segment_length, dummy_dim_x).astype(np.float32)
+                x_feature = np.zeros((self.segment_length, dummy_dim_x), dtype=np.float32)
                 
             if self.y_type == 'index':
-                y_feature = np.random.randint(0, 100, size=(self.segment_length,)).astype(np.int64)
+                y_feature = np.zeros((self.segment_length,), dtype=np.int64)
             else:
-                y_feature = np.random.randn(self.segment_length, dummy_dim_y).astype(np.float32)
+                y_feature = np.zeros((self.segment_length, dummy_dim_y), dtype=np.float32)
                 
         io_end_time = time.time()
 
@@ -188,32 +186,29 @@ class MIDataset(Dataset):
         x_len_after_repeat = x_feature.shape[0]
         y_len_after_repeat = y_feature.shape[0]
         
-        # Log if lengths differ after repeat
-        if x_len_after_repeat != y_len_after_repeat:
-            print(f"Warning: After repeat, x length ({x_len_after_repeat}) != y length ({y_len_after_repeat}) for sample {idx}.")
+        # Use maximum repeat factor as the threshold for length difference
+        max_repeat = max(self.x_repeat, self.y_repeat)
+        length_diff = abs(x_len_after_repeat - y_len_after_repeat)
+        if length_diff > max_repeat:
+            print(f"Warning: Length difference ({length_diff}) exceeds maximum repeat factor ({max_repeat}) for sample {idx}.")
+            print(f"  Lengths after repeat: x={x_len_after_repeat}, y={y_len_after_repeat}")
             print(f"  Original lengths: x={x_len_original}, y={y_len_original}")
             print(f"  Repeat factors: x={self.x_repeat}, y={self.y_repeat}")
+            self.filtered_samples.append(idx)
+        
+        # Truncate both features to minimum length regardless of length difference
+        min_x_y_len = min(x_len_after_repeat, y_len_after_repeat)
+        
+        # Truncate from beginning
+        if self.x_type == 'index' or x_feature.ndim == 1:
+            x_feature = x_feature[:min_x_y_len]
+        else:
+            x_feature = x_feature[:min_x_y_len, :]
             
-            # Check if length difference exceeds max_length_diff
-            length_diff = abs(x_len_after_repeat - y_len_after_repeat)
-            if length_diff > self.max_length_diff:
-                print(f"Warning: Length difference ({length_diff}) exceeds maximum allowed ({self.max_length_diff}) for sample {idx}. Sample will be filtered.")
-                self.filtered_samples.append(idx)
-                
-                # Return placeholder data (could be refined to skip this sample in training)
-                dummy_dim_x = self._x_dim if self._x_dim else 10
-                dummy_dim_y = self._y_dim if self._y_dim else 10
-                
-                # Create appropriate placeholder data
-                if self.x_type == 'index':
-                    x_feature = np.random.randint(0, 100, size=(self.segment_length,)).astype(np.int64)
-                else:
-                    x_feature = np.random.randn(self.segment_length, dummy_dim_x).astype(np.float32)
-                    
-                if self.y_type == 'index':
-                    y_feature = np.random.randint(0, 100, size=(self.segment_length,)).astype(np.int64)
-                else:
-                    y_feature = np.random.randn(self.segment_length, dummy_dim_y).astype(np.float32)
+        if self.y_type == 'index' or y_feature.ndim == 1:
+            y_feature = y_feature[:min_x_y_len]
+        else:
+            y_feature = y_feature[:min_x_y_len, :]
 
         # --- Record dimensions (only if not already set and first time only) ---
         if self._x_dim is None and self.x_type == 'float':
@@ -326,10 +321,10 @@ class MIDataset(Dataset):
 
         return normalized
 
-    def _aligned_crop(self, x, y, length):
+    def _aligned_crop(self, x, y, length=None):
         """
-        Aligned random crop or padding to specified length.
-        When lengths are different, we prefer truncating from the beginning.
+        Aligned crop or padding to specified length.
+        Always truncates from the beginning for both x and y.
         
         Args:
             x: x features array
@@ -346,15 +341,13 @@ class MIDataset(Dataset):
         len_x = x.shape[0]
         len_y = y.shape[0]
 
+        if length is None:
+            length = min(len_x, len_y)
+            print(f"Using dynamic length: {length} (min of len_x={len_x}, len_y={len_y})")
+
         # Handle shapes
         x_is_1d = (x.ndim == 1)
         y_is_1d = (y.ndim == 1)
-        
-        if not x_is_1d:
-            x_input_format = x.shape  # Store original shape for reference
-
-        if not y_is_1d and self.y_type == 'float':
-            y_input_format = y.shape  # Store original shape for reference
         
         # For index features, keep as 1D
         # For float features, ensure they are 2D
@@ -391,34 +384,18 @@ class MIDataset(Dataset):
                 y = np.tile(y, (repeats, 1))[:length, :]
             len_y = length
 
-        # Crop long sequences - prefer truncating from the beginning
-        if len_x == len_y:
-            # For equal lengths, randomly crop
-            max_start = len_x - length
-            start = random.randint(0, max_start) if max_start > 0 else 0
-            if x_is_1d:
-                x_cropped = x[start:start + length]
-            else:
-                x_cropped = x[start:start + length, :]
-                
-            if y_is_1d:
-                y_cropped = y[start:start + length]
-            else:
-                y_cropped = y[start:start + length, :]
+        # Crop long sequences - always truncate from the beginning
+        # We no longer differentiate between equal and different lengths
+        # Just always crop from the beginning
+        if x_is_1d:
+            x_cropped = x[:length]
         else:
-            # For different lengths, truncate from beginning
-            print(f"Warning: X ({len_x}) and Y ({len_y}) lengths differ before cropping. Truncating from beginning.")
+            x_cropped = x[:length, :]
             
-            # Start from beginning (no random offset)
-            if x_is_1d:
-                x_cropped = x[:length]
-            else:
-                x_cropped = x[:length, :]
-                
-            if y_is_1d:
-                y_cropped = y[:length]
-            else:
-                y_cropped = y[:length, :]
+        if y_is_1d:
+            y_cropped = y[:length]
+        else:
+            y_cropped = y[:length, :]
 
         return x_cropped, y_cropped
 
@@ -478,7 +455,7 @@ def create_data_loaders(config_path):
     
     x_repeat = data_config.get('x_repeat', 1)
     y_repeat = data_config.get('y_repeat', 1)
-    max_length_diff = data_config.get('max_length_diff', 5)
+    # max_length_diff is no longer used
 
     batch_size = train_config.get('batch_size', 64)
     num_workers = train_config.get('num_workers', 4)
@@ -500,19 +477,19 @@ def create_data_loaders(config_path):
         data_config['train_csv'], data_config['features_dir'],
         segment_length=segment_length, normalization=normalization, seed=seed,
         x_type=x_type, y_type=y_type, x_repeat=x_repeat, y_repeat=y_repeat,
-        max_length_diff=max_length_diff, x_dim=x_dim, y_dim=y_dim
+        x_dim=x_dim, y_dim=y_dim
     )
     valid_dataset = MIDataset(
         data_config['valid_csv'], data_config['features_dir'],
-        segment_length=segment_length, normalization=normalization, seed=seed,
+        segment_length=None, normalization=normalization, seed=seed,
         x_type=x_type, y_type=y_type, x_repeat=x_repeat, y_repeat=y_repeat,
-        max_length_diff=max_length_diff, x_dim=x_dim, y_dim=y_dim
+        x_dim=x_dim, y_dim=y_dim
     )
     test_dataset = MIDataset(
         data_config['test_csv'], data_config['features_dir'],
-        segment_length=segment_length, normalization=normalization, seed=seed,
+        segment_length=None, normalization=normalization, seed=seed,
         x_type=x_type, y_type=y_type, x_repeat=x_repeat, y_repeat=y_repeat,
-        max_length_diff=max_length_diff, x_dim=x_dim, y_dim=y_dim
+        x_dim=x_dim, y_dim=y_dim
     )
 
     # Get dimension information (configured or detected)
@@ -549,7 +526,7 @@ def create_data_loaders(config_path):
     
     print(f"  Cropped sequence length: {seq_len}")
     print(f"  Repeat factors: X={x_repeat}, Y={y_repeat}")
-    print(f"  Max length difference: {max_length_diff}")
+    print(f"  Length difference threshold: max(x_repeat, y_repeat) = {max(x_repeat, y_repeat)}")
     print(f"  Normalization method (Float): {normalization}")
     print(f"  Dataset sizes - Train: {len(train_dataset)}, Valid: {len(valid_dataset)}, Test: {len(test_dataset)}")
     

@@ -64,5 +64,11 @@ training:
   num_workers: 16          # Number of data loading processes
   seed: 42                 # Random seed
 
+# New checkpoint configuration section
+checkpoint:
+  dir: './checkpoints'     # Directory to save checkpoints
+  save_interval: 10        # Save checkpoint every N epochs
+  resume_from: null        # Path to checkpoint to resume from (null to start from scratch)
+
 logging:
   log_interval: 5          # Print detailed statistics every this many epochs

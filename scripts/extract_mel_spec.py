@@ -93,7 +93,8 @@ def main(args):
             # Get base filename
             base_name = os.path.splitext(os.path.basename(wav_path))[0]
             # Build output path, including sampling rate info
-            output_path = os.path.join(args.output_dir, f"{base_name}_mel_{args.target_sr//1000}k.npy")
+            # output_path = os.path.join(args.output_dir, f"{base_name}_mel_{args.target_sr//1000}k.npy")
+            output_path = os.path.join(args.output_dir, f"{base_name}.npy")
             
             # Extract features
             features = extract_mel_spectrogram(

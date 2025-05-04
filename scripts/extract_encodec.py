@@ -38,17 +38,19 @@ def extract_first_codebook_indices(model, audio, device):
         source = torch.from_numpy(audio).float().unsqueeze(0).to(device)
     
     with torch.no_grad():
-        # Get encoded frames
-        encoded_frames = model.encode(source)
+        # Get encoder output
+        emb = model.encoder(source)
         
-        # Extract first codebook indices
-        codes = torch.cat([encoded[0] for encoded in encoded_frames], dim=-1)  # [B, n_q, T]
+        # Get codes from quantizer
+        codes = model.quantizer.encode(emb, model.frame_rate, model.bandwidth)
         
-        # Only keep the first layer indices [B, T] and squeeze to remove batch dimension
-        features = codes[:, 0, :].squeeze(0)
+        # Extract first codebook indices (codes[0] contains indices for first codebook)
+        first_layer_codes = codes[0]  # [B, T]
         
-        # Convert tensor to numpy
-        features_np = features.cpu().numpy()
+        # Convert tensor to numpy and squeeze batch dimension
+        features_np = first_layer_codes.squeeze(0).cpu().numpy()
+        
+        # Shape is already [T] since these are just indices, so no transposition needed
         
     return features_np
 
@@ -67,35 +69,27 @@ def extract_first_codebook_repr(model, audio, device):
         source = torch.from_numpy(audio).float().unsqueeze(0).to(device)
     
     with torch.no_grad():
-        # Get encoded frames
-        encoded_frames = model.encode(source)
+        # Get encoder output
+        emb = model.encoder(source)
         
-        # Extract first codebook indices
-        codes = torch.cat([encoded[0] for encoded in encoded_frames], dim=-1)  # [B, n_q, T]
+        # Get codes from quantizer
+        codes = model.quantizer.encode(emb, model.frame_rate, model.bandwidth)
         
-        # Keep only the first layer indices and create a codes tensor with zeros for all other codebooks
-        first_codes = codes.clone()
-        first_codes[:, 1:, :] = 0
-        
-        # Use model's quantizer to decode only the first codebook representation
-        # Get the codebook weights from the first quantizer
+        # Get the first layer codebook
         codebook_weights = model.quantizer.vq.layers[0].codebook
         
-        # Use the indices to lookup embeddings from codebook
-        indices = first_codes[:, 0, :]
-        embeddings = torch.nn.functional.embedding(indices, codebook_weights)  # [B, T, D]
+        # Use first codebook indices to lookup embeddings
+        first_layer_codes = codes[0]  # [B, T]
         
-        # Prepare the shape for decoder (need to transpose)
-        embeddings = embeddings.transpose(1, 2)  # [B, D, T]
+        # Use embedding lookup to get the representations
+        embeddings = torch.nn.functional.embedding(first_layer_codes, codebook_weights)  # [B, T, D]
         
-        # Decode to get the first codebook representation
-        semantic_repr = model.decoder(embeddings)
+        # No need to transpose - keep as [B, T, D]
         
-        # Squeeze to remove batch dimension
-        semantic_repr = semantic_repr.squeeze(0)
+        # Convert to numpy and squeeze batch dimension
+        features_np = embeddings.squeeze(0).cpu().numpy()
         
-        # Convert to numpy
-        features_np = semantic_repr.cpu().numpy()
+        # Shape is now [T, D] as required
         
     return features_np
 
@@ -114,17 +108,44 @@ def extract_all_codebook_repr(model, audio, device):
         source = torch.from_numpy(audio).float().unsqueeze(0).to(device)
     
     with torch.no_grad():
-        # First get encoder output (latent features before quantization)
+        # Get encoder output
         emb = model.encoder(source)
         
-        # Decode the latent representation (without quantization)
-        representation = model.decoder(emb)
+        # Get codes from quantizer
+        codes = model.quantizer.encode(emb, model.frame_rate, model.bandwidth)
         
-        # Squeeze to remove batch dimension
-        representation = representation.squeeze(0)
+        # Get number of quantizers used for the current bandwidth
+        num_q = model.quantizer.get_num_quantizers_for_bandwidth(model.frame_rate, model.bandwidth)
         
-        # Convert to numpy
-        features_np = representation.cpu().numpy()
+        # Concatenate codebook weights from all used layers
+        codebook_weights = torch.cat([vq.codebook for vq in model.quantizer.vq.layers[:num_q]], dim=0)
+        
+        # Get offsets for each codebook
+        offsets = torch.arange(
+            0, model.quantizer.bins * len(codes), model.quantizer.bins, device=device
+        )
+        
+        # Add offsets to codes
+        embeddings_idxs = torch.stack(codes) + offsets.view(-1, 1, 1)
+        
+        # Flatten the first dimension to use with embedding
+        embeddings_idxs = embeddings_idxs.reshape(-1, embeddings_idxs.shape[-1])  # [num_q*B, T]
+        
+        # Use embedding lookup to get the representations
+        embeddings = torch.nn.functional.embedding(embeddings_idxs, codebook_weights)  # [num_q*B, T, D]
+        
+        # Reshape back to separate the codebooks
+        embeddings = embeddings.reshape(len(codes), source.shape[0], embeddings.shape[1], embeddings.shape[2])  # [num_q, B, T, D]
+        
+        # Sum contributions from all codebooks
+        embeddings = embeddings.sum(dim=0)  # [B, T, D]
+        
+        # No need to transpose - keep as [B, T, D]
+        
+        # Convert to numpy and squeeze batch dimension
+        features_np = embeddings.squeeze(0).cpu().numpy()
+        
+        # Shape is now [T, D] as required
         
     return features_np
 

@@ -343,7 +343,7 @@ class MIDataset(Dataset):
 
         if length is None:
             length = min(len_x, len_y)
-            print(f"Using dynamic length: {length} (min of len_x={len_x}, len_y={len_y})")
+            # print(f"Using dynamic length: {length} (min of len_x={len_x}, len_y={len_y})")
 
         # Handle shapes
         x_is_1d = (x.ndim == 1)
@@ -481,7 +481,7 @@ def create_data_loaders(config_path):
     )
     valid_dataset = MIDataset(
         data_config['valid_csv'], data_config['features_dir'],
-        segment_length=None, normalization=normalization, seed=seed,
+        segment_length=segment_length, normalization=normalization, seed=seed,
         x_type=x_type, y_type=y_type, x_repeat=x_repeat, y_repeat=y_repeat,
         x_dim=x_dim, y_dim=y_dim
     )
@@ -550,7 +550,7 @@ def create_data_loaders(config_path):
         num_workers=num_workers, pin_memory=True
     )
     test_loader = DataLoader(
-        test_dataset, batch_size=batch_size, shuffle=False,
+        test_dataset, batch_size=1, shuffle=False,
         num_workers=num_workers, pin_memory=True
     )
 

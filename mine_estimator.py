@@ -84,11 +84,11 @@ class MINE:
             raise ValueError(f"Unsupported feature types: x_type={x_type}, y_type={y_type}. Choose 'float' or 'index'.")
 
         # Optimizer
-        self.optimizer = optim.Adam(
+        self.optimizer = optim.AdamW(
             self.mine_net.parameters(),
             lr=lr,
             betas=(0.9, 0.999),
-            weight_decay=1e-4
+            weight_decay=1e-2
         )
 
         # Learning rate scheduler (optional, but recommended)

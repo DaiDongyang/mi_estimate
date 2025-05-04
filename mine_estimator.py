@@ -104,6 +104,8 @@ class MINE:
         # Diagnostic information
         self.recent_t_values = []
         self.gradient_norms = []
+        self.ema_denominator = None
+        self.ema_alpha = 0.01
 
     def compute_mutual_info(self, x_joint, y_joint):
         """
@@ -167,15 +169,24 @@ class MINE:
             self.recent_t_values.pop(0)
         # --- End diagnostic information ---
 
-        # --- 3. Compute MI lower bound ---
+        # --- 3. Compute MI lower bound with bias correction ---
         # E_P[T] - log(E_Q[e^T]), where P is joint distribution, Q is product of marginals
         e_joint = torch.mean(t_joint)
 
         # Use logsumexp trick for numerical stability in computing log(E_Q[e^T])
         max_t = torch.max(t_marginal).detach()
-        log_e_marginal = max_t + torch.log(
-            torch.mean(torch.exp(t_marginal - max_t)) + 1e-8  # Add small epsilon to prevent log(0)
-        )
+        
+        # Compute current batch denominator
+        batch_denominator = torch.mean(torch.exp(t_marginal - max_t))
+        
+        # Update exponential moving average of the denominator (bias correction)
+        if self.ema_denominator is None:
+            self.ema_denominator = batch_denominator.detach()
+        else:
+            self.ema_denominator = (1 - self.ema_alpha) * self.ema_denominator + self.ema_alpha * batch_denominator.detach()
+        
+        # Use EMA for the denominator calculation
+        log_e_marginal = max_t + torch.log(self.ema_denominator + 1e-8)  # Add small epsilon to prevent log(0)
 
         mi_estimate = e_joint - log_e_marginal
         return mi_estimate

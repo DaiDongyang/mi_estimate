@@ -25,6 +25,8 @@ find $TEST_DATASET_DIR -name "*.wav" > filelist.test
 
 Use the scripts in the `scripts` directory to extract different types of features:
 
+> **Note:** When using models like Wav2vec2.0, MOSHI, etc. for feature extraction, additional environment setup is required.
+
 #### EnCodec Features
 
 ```bash

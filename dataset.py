@@ -18,7 +18,8 @@ class MIDataset(Dataset):
                  normalization='standard', seed=42, 
                  x_type='float', y_type='float',
                  x_repeat=1, y_repeat=1,
-                 x_dim=None, y_dim=None):  # Removed max_length_diff parameter
+                 max_length_diff=5,
+                 x_dim=None, y_dim=None): 
         """
         Initialize dataset
         
@@ -42,7 +43,7 @@ class MIDataset(Dataset):
         self.y_type = y_type
         self.x_repeat = x_repeat
         self.y_repeat = y_repeat
-        # max_length_diff is no longer needed as we use max(self.x_repeat, self.y_repeat) instead
+        self.max_length_diff = max_length_diff
         
         # Set appropriate dtypes based on feature types
         self.x_dtype = torch.long if x_type == 'index' else torch.float32
@@ -189,7 +190,7 @@ class MIDataset(Dataset):
         # Use maximum repeat factor as the threshold for length difference
         max_repeat = max(self.x_repeat, self.y_repeat)
         length_diff = abs(x_len_after_repeat - y_len_after_repeat)
-        if length_diff > max_repeat:
+        if length_diff > max_repeat and length_diff > self.max_length_diff:
             print(f"Warning: Length difference ({length_diff}) exceeds maximum repeat factor ({max_repeat}) for sample {idx}.")
             print(f"  Lengths after repeat: x={x_len_after_repeat}, y={y_len_after_repeat}")
             print(f"  Original lengths: x={x_len_original}, y={y_len_original}")
@@ -455,7 +456,7 @@ def create_data_loaders(config_path):
     
     x_repeat = data_config.get('x_repeat', 1)
     y_repeat = data_config.get('y_repeat', 1)
-    # max_length_diff is no longer used
+    max_length_diff = data_config.get('max_length_diff', 5)
 
     batch_size = train_config.get('batch_size', 64)
     num_workers = train_config.get('num_workers', 4)
@@ -477,19 +478,19 @@ def create_data_loaders(config_path):
         data_config['train_csv'], data_config['features_dir'],
         segment_length=segment_length, normalization=normalization, seed=seed,
         x_type=x_type, y_type=y_type, x_repeat=x_repeat, y_repeat=y_repeat,
-        x_dim=x_dim, y_dim=y_dim
+        max_length_diff=max_length_diff, x_dim=x_dim, y_dim=y_dim
     )
     valid_dataset = MIDataset(
         data_config['valid_csv'], data_config['features_dir'],
         segment_length=segment_length, normalization=normalization, seed=seed,
         x_type=x_type, y_type=y_type, x_repeat=x_repeat, y_repeat=y_repeat,
-        x_dim=x_dim, y_dim=y_dim
+        max_length_diff=max_length_diff, x_dim=x_dim, y_dim=y_dim
     )
     test_dataset = MIDataset(
         data_config['test_csv'], data_config['features_dir'],
         segment_length=None, normalization=normalization, seed=seed,
         x_type=x_type, y_type=y_type, x_repeat=x_repeat, y_repeat=y_repeat,
-        x_dim=x_dim, y_dim=y_dim
+        max_length_diff=max_length_diff, x_dim=x_dim, y_dim=y_dim
     )
 
     # Get dimension information (configured or detected)

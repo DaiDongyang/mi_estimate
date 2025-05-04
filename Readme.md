@@ -80,9 +80,9 @@ data:
   x_repeat: 4               # Repeat factor for x features (upsampling), e.g., 10ms -> 20ms
   y_repeat: 1               # Repeat factor for y features, leave at 1 if no upsampling needed
   
-#   # Maximum allowed difference between x and y lengths after repeat
-#   # Samples exceeding this difference will be filtered out
-#   max_length_diff: 5        # Max absolute difference between x_length and y_length
+  # Maximum allowed difference between x and y lengths after repeat
+  # Samples exceeding this difference will be filtered out
+  max_length_diff: 5        # Max absolute difference between x_length and y_length
 
 model:
   # Feature type options (select appropriate pair):

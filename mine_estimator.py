@@ -104,7 +104,7 @@ class MINE:
         # Diagnostic information
         self.recent_t_values = []
         self.gradient_norms = []
-        self.ema_denominator = None
+        self.ema_expectation = None
         self.ema_alpha = 0.01
 
     def compute_mutual_info(self, x_joint, y_joint):
@@ -194,14 +194,14 @@ class MINE:
         # Return MI estimate and intermediate values needed for bias correction
         return mi_estimate, t_joint, t_marginal, full_expectation
 
-    def train_batch(self, x_joint_orig, y_joint_orig, bias_correction_method='none'):
+    def train_batch(self, x_joint_orig, y_joint_orig, bias_correction_method='default'):
         """
         Train MINE network on a single batch
         
         Args:
             x_joint_orig: Original joint X samples
             y_joint_orig: Original joint Y samples
-            bias_correction_method: Method to use for bias correction ('log', 'direct', or 'none')
+            bias_correction_method: Method to use for bias correction ('default', or 'none')
                     
         Returns:
             MI estimate for this batch (float), loss value (float)
@@ -226,26 +226,10 @@ class MINE:
         if bias_correction_method == 'none':
             # No bias correction (original implementation)
             loss = -mi_estimate
-        elif bias_correction_method == 'log':
-            # Method 1: Log-based bias correction
-            # First, compute joint expectation E_P[T]
+        else:
+            # reference from: https://github.com/sungyubkim/MINE-Mutual-Information-Neural-Estimation-/blob/master/MINE.ipynb
             e_joint = torch.mean(t_joint)
-            
-            # Apply correction in log space
-            # According to Section 3.2 of the paper, we can correct bias by adjusting the denominator
-            # Computing: E_P[T] - log(E_Q[e^T] * correction)
-            # where correction = E_batch[e^T] / EMA(E_batch[e^T])
-            expectation_ratio = (full_expectation / self.ema_expectation).detach()
-            
-            # Recompute log(E_Q[e^T]) with correction factor
-            t_marginal_mean = torch.mean(t_marginal)
-            loss = -(e_joint - t_marginal_mean - torch.log(expectation_ratio))
-        else:  # 'direct'
-            # Method 2: Direct bias correction (similar to reference implementation)
-            # This implementation more directly reflects the original paper and reference code
-            e_joint = torch.mean(t_joint)
-            correction_ratio = (full_expectation / self.ema_expectation).detach()
-            loss = -(e_joint - correction_ratio * full_expectation)
+            loss = -(e_joint - (1.0 / self.ema_expectation).detach() * full_expectation)
 
         # Backpropagation and optimization
         self.optimizer.zero_grad()

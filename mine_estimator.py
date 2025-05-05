@@ -116,7 +116,7 @@ class MINE:
             y_joint: Joint distribution Y samples, shape [B, S, Dy] (float) or [B, S] (long)
             
         Returns:
-            Mutual information estimate (scalar Tensor), plus intermediate values for bias correction
+            Mutual information estimate (scalar Tensor) and intermediate values for bias correction
         """
         # --- 1. Generate y_marginal ---
         # Create marginal samples y' by shuffling y_joint along the N=B*S dimension
@@ -175,20 +175,24 @@ class MINE:
 
         # Use logsumexp trick for numerical stability in computing log(E_Q[e^T])
         max_t = torch.max(t_marginal).detach()
-        batch_denominator = torch.mean(torch.exp(t_marginal - max_t))
+        stabilized_denom = torch.mean(torch.exp(t_marginal - max_t))
         
-        # Update exponential moving average of the denominator (for bias correction)
-        if self.ema_denominator is None:
-            self.ema_denominator = batch_denominator.detach()
+        # Calculate full expectation E_Q[e^T] (for EMA updates)
+        # Using log-sum-exp trick to avoid overflow
+        full_expectation = stabilized_denom * torch.exp(max_t.to(torch.float32))
+        
+        # Update EMA of the expectation
+        if self.ema_expectation is None:
+            self.ema_expectation = full_expectation.detach()
         else:
-            self.ema_denominator = (1 - self.ema_alpha) * self.ema_denominator + self.ema_alpha * batch_denominator.detach()
+            self.ema_expectation = (1 - self.ema_alpha) * self.ema_expectation + self.ema_alpha * full_expectation.detach()
         
         # Standard MI computation (without bias correction)
-        log_e_marginal = max_t + torch.log(batch_denominator + 1e-8)
+        log_e_marginal = max_t + torch.log(stabilized_denom + 1e-8)
         mi_estimate = e_joint - log_e_marginal
         
-        # Return standard MI estimate and intermediate values for bias correction
-        return mi_estimate, t_joint, t_marginal, max_t, batch_denominator
+        # Return MI estimate and intermediate values needed for bias correction
+        return mi_estimate, t_joint, t_marginal, full_expectation
 
     def train_batch(self, x_joint_orig, y_joint_orig, bias_correction_method='none'):
         """
@@ -198,7 +202,7 @@ class MINE:
             x_joint_orig: Original joint X samples
             y_joint_orig: Original joint Y samples
             bias_correction_method: Method to use for bias correction ('log', 'direct', or 'none')
-                
+                    
         Returns:
             MI estimate for this batch (float), loss value (float)
         """
@@ -216,22 +220,32 @@ class MINE:
             y_joint = y_joint_orig.float().to(self.device)  # Ensure float tensor
 
         # Compute MI and get intermediate values for bias correction
-        mi_estimate, t_joint, t_marginal, max_t, batch_denominator = self.compute_mutual_info(x_joint, y_joint)
+        mi_estimate, t_joint, t_marginal, full_expectation = self.compute_mutual_info(x_joint, y_joint)
 
-        # Compute loss with bias correction
+        # Compute loss with or without bias correction
         if bias_correction_method == 'none':
             # No bias correction (original implementation)
             loss = -mi_estimate
         elif bias_correction_method == 'log':
-            # Method 1: Log-based bias correction (maintains numerical stability)
+            # Method 1: Log-based bias correction
+            # First, compute joint expectation E_P[T]
             e_joint = torch.mean(t_joint)
-            correction_term = (batch_denominator / self.ema_denominator).detach()
-            log_e_marginal = max_t + torch.log(batch_denominator + 1e-8)
-            loss = -(e_joint - correction_term * log_e_marginal)
+            
+            # Apply correction in log space
+            # According to Section 3.2 of the paper, we can correct bias by adjusting the denominator
+            # Computing: E_P[T] - log(E_Q[e^T] * correction)
+            # where correction = E_batch[e^T] / EMA(E_batch[e^T])
+            expectation_ratio = (full_expectation / self.ema_expectation).detach()
+            
+            # Recompute log(E_Q[e^T]) with correction factor
+            t_marginal_mean = torch.mean(t_marginal)
+            loss = -(e_joint - t_marginal_mean - torch.log(expectation_ratio))
         else:  # 'direct'
-            # Method 2: Direct bias correction (as in the original implementation)
-            batch_et = torch.mean(torch.exp(t_marginal))
-            loss = -(torch.mean(t_joint) - (batch_et/self.ema_denominator).detach())
+            # Method 2: Direct bias correction (similar to reference implementation)
+            # This implementation more directly reflects the original paper and reference code
+            e_joint = torch.mean(t_joint)
+            correction_ratio = (full_expectation / self.ema_expectation).detach()
+            loss = -(e_joint - correction_ratio * full_expectation)
 
         # Backpropagation and optimization
         self.optimizer.zero_grad()
@@ -299,7 +313,7 @@ class MINE:
                     y_joint = batch_y.float().to(self.device)
 
                 # Compute MI (without bias correction for evaluation)
-                mi_estimate, _, _, _, _ = self.compute_mutual_info(x_joint, y_joint)
+                mi_estimate, _, _, _ = self.compute_mutual_info(x_joint, y_joint)
 
                 if not np.isnan(mi_estimate.item()) and not np.isinf(mi_estimate.item()):
                     eval_mi.append(mi_estimate.item())

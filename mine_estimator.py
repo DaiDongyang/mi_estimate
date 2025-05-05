@@ -116,7 +116,7 @@ class MINE:
             y_joint: Joint distribution Y samples, shape [B, S, Dy] (float) or [B, S] (long)
             
         Returns:
-            Mutual information estimate (scalar Tensor)
+            Mutual information estimate (scalar Tensor), plus intermediate values for bias correction
         """
         # --- 1. Generate y_marginal ---
         # Create marginal samples y' by shuffling y_joint along the N=B*S dimension
@@ -169,36 +169,36 @@ class MINE:
             self.recent_t_values.pop(0)
         # --- End diagnostic information ---
 
-        # --- 3. Compute MI lower bound with bias correction ---
+        # --- 3. Compute MI lower bound ---
         # E_P[T] - log(E_Q[e^T]), where P is joint distribution, Q is product of marginals
         e_joint = torch.mean(t_joint)
 
         # Use logsumexp trick for numerical stability in computing log(E_Q[e^T])
         max_t = torch.max(t_marginal).detach()
-        
-        # Compute current batch denominator
         batch_denominator = torch.mean(torch.exp(t_marginal - max_t))
         
-        # Update exponential moving average of the denominator (bias correction)
+        # Update exponential moving average of the denominator (for bias correction)
         if self.ema_denominator is None:
             self.ema_denominator = batch_denominator.detach()
         else:
             self.ema_denominator = (1 - self.ema_alpha) * self.ema_denominator + self.ema_alpha * batch_denominator.detach()
         
-        # Use EMA for the denominator calculation
-        log_e_marginal = max_t + torch.log(self.ema_denominator + 1e-8)  # Add small epsilon to prevent log(0)
-
+        # Standard MI computation (without bias correction)
+        log_e_marginal = max_t + torch.log(batch_denominator + 1e-8)
         mi_estimate = e_joint - log_e_marginal
-        return mi_estimate
+        
+        # Return standard MI estimate and intermediate values for bias correction
+        return mi_estimate, t_joint, t_marginal, max_t, batch_denominator
 
-    def train_batch(self, x_joint_orig, y_joint_orig):
+    def train_batch(self, x_joint_orig, y_joint_orig, bias_correction_method='none'):
         """
         Train MINE network on a single batch
         
         Args:
             x_joint_orig: Original joint X samples
             y_joint_orig: Original joint Y samples
-            
+            bias_correction_method: Method to use for bias correction ('log', 'direct', or 'none')
+                
         Returns:
             MI estimate for this batch (float), loss value (float)
         """
@@ -215,11 +215,23 @@ class MINE:
         else:
             y_joint = y_joint_orig.float().to(self.device)  # Ensure float tensor
 
-        # Compute MI (will generate y_marginal internally and call forward)
-        mi_estimate = self.compute_mutual_info(x_joint, y_joint)
+        # Compute MI and get intermediate values for bias correction
+        mi_estimate, t_joint, t_marginal, max_t, batch_denominator = self.compute_mutual_info(x_joint, y_joint)
 
-        # Loss function: maximizing MI is equivalent to minimizing -MI
-        loss = -mi_estimate
+        # Compute loss with bias correction
+        if bias_correction_method == 'none':
+            # No bias correction (original implementation)
+            loss = -mi_estimate
+        elif bias_correction_method == 'log':
+            # Method 1: Log-based bias correction (maintains numerical stability)
+            e_joint = torch.mean(t_joint)
+            correction_term = (batch_denominator / self.ema_denominator).detach()
+            log_e_marginal = max_t + torch.log(batch_denominator + 1e-8)
+            loss = -(e_joint - correction_term * log_e_marginal)
+        else:  # 'direct'
+            # Method 2: Direct bias correction (as in the original implementation)
+            batch_et = torch.mean(torch.exp(t_marginal))
+            loss = -(torch.mean(t_joint) - (batch_et/self.ema_denominator).detach())
 
         # Backpropagation and optimization
         self.optimizer.zero_grad()
@@ -286,8 +298,8 @@ class MINE:
                 else:
                     y_joint = batch_y.float().to(self.device)
 
-                # Compute MI
-                mi_estimate = self.compute_mutual_info(x_joint, y_joint)
+                # Compute MI (without bias correction for evaluation)
+                mi_estimate, _, _, _, _ = self.compute_mutual_info(x_joint, y_joint)
 
                 if not np.isnan(mi_estimate.item()) and not np.isinf(mi_estimate.item()):
                     eval_mi.append(mi_estimate.item())

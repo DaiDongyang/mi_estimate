@@ -194,7 +194,7 @@ class MINE:
         # Return MI estimate and intermediate values needed for bias correction
         return mi_estimate, t_joint, t_marginal, full_expectation
 
-    def train_batch(self, x_joint_orig, y_joint_orig, bias_correction_method='default'):
+    def train_batch(self, x_joint_orig, y_joint_orig, bias_correction_method='none'):
         """
         Train MINE network on a single batch
         
@@ -251,14 +251,14 @@ class MINE:
 
         return mi_estimate.item(), loss.item()
 
-    def train_epoch(self, train_loader):
+    def train_epoch(self, train_loader, bias_correction_method='none'):
         """Train for one epoch"""
         self.mine_net.train()
         epoch_mi = []
         total_loss = 0.0
 
         for batch_idx, (batch_x, batch_y) in enumerate(train_loader):
-            mi_value, loss_value = self.train_batch(batch_x, batch_y)
+            mi_value, loss_value = self.train_batch(batch_x, batch_y, bias_correction_method)
 
             if not np.isnan(mi_value) and not np.isinf(mi_value):
                 epoch_mi.append(mi_value)

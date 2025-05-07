@@ -114,6 +114,7 @@ def main(config_path):
     # Get feature types and dimensions from configuration
     x_type = model_config.get('x_type', 'float')
     y_type = model_config.get('y_type', 'float')
+    bias_correction_method = model_config.get('bias_correction_method', 'none')
     
     # Vocabulary sizes and embedding dimensions (for index features)
     x_vocab_size = model_config.get('x_vocab_size')
@@ -216,7 +217,7 @@ def main(config_path):
         # --- Training ---
         try:
             pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs} [Train]", leave=False, ncols=100)
-            avg_train_mi, avg_train_loss = mine_model.train_epoch(pbar)
+            avg_train_mi, avg_train_loss = mine_model.train_epoch(pbar, bias_correction_method=bias_correction_method)
             pbar.close()
             if len(pbar) == 0:  # Check if train_loader is empty
                 print(f"Warning: Train loader for Epoch {epoch} is empty, cannot train.")

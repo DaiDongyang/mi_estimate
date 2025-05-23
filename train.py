@@ -1,5 +1,6 @@
 """
-Main script for training MINE model with checkpoint saving functionality
+Main script for training MINE model with checkpoint saving functionality, projection layer and context window support
+Now with periodic validation during training for large datasets
 """
 import torch
 import yaml
@@ -7,18 +8,19 @@ import os
 import time
 import argparse
 from tqdm import tqdm  # For progress bar
-
+import numpy as np
 # Import modules from same directory or Python path
 from mine_estimator import MINE
 from dataset import create_data_loaders
 
-def save_checkpoint(mine_model, epoch, best_val_mi, checkpoint_dir, filename):
+def save_checkpoint(mine_model, epoch, step, best_val_mi, checkpoint_dir, filename):
     """
     Save model checkpoint
     
     Args:
         mine_model: MINE model instance
         epoch: Current epoch
+        step: Current step (total batches processed)
         best_val_mi: Best validation MI value
         checkpoint_dir: Directory to save checkpoints
         filename: Checkpoint filename
@@ -29,6 +31,7 @@ def save_checkpoint(mine_model, epoch, best_val_mi, checkpoint_dir, filename):
     # Prepare checkpoint data
     checkpoint = {
         'epoch': epoch,
+        'step': step,
         'model_state_dict': mine_model.mine_net.state_dict(),
         'optimizer_state_dict': mine_model.optimizer.state_dict(),
         'scheduler_state_dict': mine_model.scheduler.state_dict(),
@@ -54,6 +57,7 @@ def load_checkpoint(mine_model, checkpoint_path):
         
     Returns:
         epoch: Last saved epoch
+        step: Last saved step
         best_val_mi: Best validation MI from checkpoint
     """
     checkpoint = torch.load(checkpoint_path, map_location=mine_model.device)
@@ -65,7 +69,7 @@ def load_checkpoint(mine_model, checkpoint_path):
     mine_model.val_mi_history = checkpoint['val_mi_history']
     mine_model.best_val_mi = checkpoint['best_val_mi']
     
-    return checkpoint['epoch'], checkpoint['best_val_mi']
+    return checkpoint['epoch'], checkpoint.get('step', 0), checkpoint['best_val_mi']
 
 def main(config_path):
     """Main training function, takes configuration file path as parameter"""
@@ -75,7 +79,6 @@ def main(config_path):
             config = yaml.safe_load(f)
         print(f"Successfully loaded configuration file: {config_path}")
     except FileNotFoundError:
-        # argparse should handle file not found case before calling main, but keep this as a fallback
         print(f"Error: Configuration file not found {config_path}")
         return
     except yaml.YAMLError as e:
@@ -94,6 +97,14 @@ def main(config_path):
     checkpoint_dir = checkpoint_config.get('dir', './checkpoints')
     checkpoint_interval = checkpoint_config.get('save_interval', 10)
     resume_training = checkpoint_config.get('resume_from', None)
+    
+    # Validation configuration
+    validation_config = config.get('validation', {})
+    validate_every_n_steps = validation_config.get('validate_every_n_steps', None)
+    early_stopping_patience = validation_config.get('early_stopping_patience', None)
+    
+    # If validate_every_n_steps is not set, validate once per epoch
+    validate_per_epoch = validate_every_n_steps is None
 
     # --- 2. Create data loaders and get dimensions ---
     try:
@@ -116,14 +127,21 @@ def main(config_path):
     y_type = model_config.get('y_type', 'float')
     bias_correction_method = model_config.get('bias_correction_method', 'none')
     
+    # Get context frame numbers from data config
+    data_config = config.get('data', {})
+    context_frame_numbers = data_config.get('context_frame_numbers', 1)
+    
     # Vocabulary sizes and embedding dimensions (for index features)
     x_vocab_size = model_config.get('x_vocab_size')
     x_embedding_dim = model_config.get('x_embedding_dim')
     y_vocab_size = model_config.get('y_vocab_size')
     y_embedding_dim = model_config.get('y_embedding_dim')
     
-    # Feature dimensions - x_dim and y_dim might already be provided by the data_info
-    # but model_config can override them if specified
+    # Projection dimensions (new feature)
+    x_proj_dim = model_config.get('x_proj_dim')
+    y_proj_dim = model_config.get('y_proj_dim')
+    
+    # Feature dimensions
     config_x_dim = model_config.get('x_dim')
     config_y_dim = model_config.get('y_dim')
     
@@ -133,6 +151,13 @@ def main(config_path):
 
     print(f"Preparing to initialize MINE model (x_type: {x_type}, y_type: {y_type})...")
     print(f"Feature dimensions: x_dim={final_x_dim}, y_dim={final_y_dim}")
+    print(f"Context frame numbers: {context_frame_numbers}")
+    
+    # Print projection info if available
+    if x_proj_dim is not None and x_type == 'float':
+        print(f"X projection: {final_x_dim} -> {x_proj_dim}")
+    if y_proj_dim is not None and y_type == 'float':
+        print(f"Y projection: {final_y_dim} -> {y_proj_dim}")
     
     # Check required parameters based on feature types
     if x_type == 'index' and (x_vocab_size is None or x_embedding_dim is None):
@@ -145,14 +170,10 @@ def main(config_path):
         
     if x_type == 'float' and final_x_dim is None:
         print("Error: Could not determine x_dim for float features.")
-        print("Please ensure data loading is working correctly and CSV files point to valid float features,")
-        print("or specify x_dim explicitly in the model section of config.yaml.")
         return
         
     if y_type == 'float' and final_y_dim is None:
         print("Error: Could not determine y_dim for float features.")
-        print("Please ensure data loading is working correctly and CSV files point to valid float features,")
-        print("or specify y_dim explicitly in the model section of config.yaml.")
         return
 
     try:
@@ -165,6 +186,9 @@ def main(config_path):
             x_embedding_dim=x_embedding_dim,
             y_vocab_size=y_vocab_size,
             y_embedding_dim=y_embedding_dim,
+            x_proj_dim=x_proj_dim,
+            y_proj_dim=y_proj_dim,
+            context_frame_numbers=context_frame_numbers,
             hidden_dims=model_config.get('hidden_dims', [512, 512, 256]),
             activation=model_config.get('activation', 'relu'),
             batch_norm=model_config.get('batch_norm', True),
@@ -179,13 +203,15 @@ def main(config_path):
 
     # --- 4. Resume from checkpoint if specified ---
     start_epoch = 1
+    global_step = 0
     best_epoch = -1
     if resume_training:
         try:
             print(f"Resuming training from checkpoint: {resume_training}")
-            loaded_epoch, loaded_best_val_mi = load_checkpoint(mine_model, resume_training)
-            start_epoch = loaded_epoch + 1
-            print(f"Resumed from epoch {loaded_epoch} with best validation MI: {loaded_best_val_mi:.6f}")
+            loaded_epoch, loaded_step, loaded_best_val_mi = load_checkpoint(mine_model, resume_training)
+            start_epoch = loaded_epoch
+            global_step = loaded_step
+            print(f"Resumed from epoch {loaded_epoch}, step {loaded_step} with best validation MI: {loaded_best_val_mi:.6f}")
             best_epoch = loaded_epoch if loaded_best_val_mi == mine_model.best_val_mi else best_epoch
         except Exception as e:
             print(f"Error loading checkpoint: {e}")
@@ -193,7 +219,7 @@ def main(config_path):
     
     # --- 5. Training loop ---
     epochs = train_config.get('epochs', 100)
-    log_interval = log_config.get('log_interval', 10)  # Adjust print interval
+    log_interval = log_config.get('log_interval', 10)
 
     print("\n" + "="*30)
     print(f"Starting MINE model training (x_type: {x_type}, y_type: {y_type})")
@@ -201,6 +227,12 @@ def main(config_path):
     print(f"Using device: {mine_model.device}")
     print(f"Checkpoints will be saved to: {checkpoint_dir}")
     print(f"Checkpoint save interval: {checkpoint_interval} epochs")
+    if validate_every_n_steps:
+        print(f"Validation interval: every {validate_every_n_steps} steps")
+    else:
+        print("Validation interval: once per epoch")
+    if early_stopping_patience:
+        print(f"Early stopping patience: {early_stopping_patience} validations")
     print("="*30 + "\n")
 
     # Create checkpoint directory if it doesn't exist
@@ -208,57 +240,144 @@ def main(config_path):
 
     start_time = time.time()
     
-    # Track best validation performance for saving best model
+    # Track best validation performance
     best_checkpoint_path = None
+    patience_counter = 0
+    
+    # For tracking within-epoch training statistics
+    epoch_mi_values = []
+    epoch_loss_values = []
+    steps_in_current_epoch = 0
 
     for epoch in range(start_epoch, epochs + 1):
         epoch_start_time = time.time()
-
-        # --- Training ---
-        try:
-            pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs} [Train]", leave=False, ncols=100)
-            avg_train_mi, avg_train_loss = mine_model.train_epoch(pbar, bias_correction_method=bias_correction_method)
-            pbar.close()
-            if len(pbar) == 0:  # Check if train_loader is empty
-                print(f"Warning: Train loader for Epoch {epoch} is empty, cannot train.")
-                continue  # Skip remainder of this epoch
-        except Exception as e:
-            print(f"\nError: Error occurred during training Epoch {epoch} - {e}")
-            # Can choose to continue to next epoch or stop training
-            print("Skipping this Epoch's training.")
-            continue  # Go to next epoch
-
-        # --- Validation ---
-        try:
+        
+        # Reset epoch statistics
+        epoch_mi_values = []
+        epoch_loss_values = []
+        steps_in_current_epoch = 0
+        
+        # Set model to training mode
+        mine_model.mine_net.train()
+        
+        # Create progress bar for the epoch
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False, ncols=100)
+        
+        for batch_idx, (batch_x, batch_y) in enumerate(pbar):
+            try:
+                # Train on batch
+                mi_value, loss_value = mine_model.train_batch(batch_x, batch_y, bias_correction_method=bias_correction_method)
+                
+                if not np.isnan(mi_value) and not np.isinf(mi_value):
+                    epoch_mi_values.append(mi_value)
+                    epoch_loss_values.append(loss_value)
+                else:
+                    print(f"\nWarning: Batch {batch_idx} produced invalid MI/Loss values, skipped.")
+                
+                # Update global step counter
+                global_step += 1
+                steps_in_current_epoch += 1
+                
+                # Update progress bar with current MI
+                if epoch_mi_values:
+                    current_avg_mi = np.mean(epoch_mi_values[-100:])  # Average of last 100 batches
+                    pbar.set_postfix({'MI': f'{current_avg_mi:.4f}'})
+                
+                # Periodic validation based on steps
+                if validate_every_n_steps and global_step % validate_every_n_steps == 0:
+                    print(f"\n[Step {global_step}] Running validation...")
+                    avg_val_mi = mine_model.validate(valid_loader)
+                    
+                    # Check if new best validation MI
+                    if avg_val_mi > mine_model.best_val_mi:
+                        best_epoch = epoch
+                        patience_counter = 0
+                        # Save best model checkpoint
+                        best_checkpoint_path = save_checkpoint(
+                            mine_model, epoch, global_step, mine_model.best_val_mi, 
+                            checkpoint_dir, f"best_model.pth"
+                        )
+                        print(f"  * New best model saved! Val MI: {avg_val_mi:.6f}")
+                    else:
+                        patience_counter += 1
+                        if early_stopping_patience and patience_counter >= early_stopping_patience:
+                            print(f"\nEarly stopping triggered after {patience_counter} validations without improvement.")
+                            pbar.close()
+                            break
+                    
+                    # Save periodic checkpoint based on steps
+                    if global_step % (validate_every_n_steps * checkpoint_interval) == 0:
+                        save_checkpoint(
+                            mine_model, epoch, global_step, mine_model.best_val_mi,
+                            checkpoint_dir, f"checkpoint_step_{global_step}.pth"
+                        )
+                    
+                    # Print current statistics
+                    avg_train_mi = np.mean(epoch_mi_values) if epoch_mi_values else 0.0
+                    avg_train_loss = np.mean(epoch_loss_values) if epoch_loss_values else 0.0
+                    print(f"  Step {global_step} | Train MI: {avg_train_mi:.6f} | Train Loss: {avg_train_loss:.6f} | "
+                          f"Val MI: {avg_val_mi:.6f} | Best Val MI: {mine_model.best_val_mi:.6f}")
+                    
+                    # Return to training mode
+                    mine_model.mine_net.train()
+                    
+            except Exception as e:
+                print(f"\nError in batch {batch_idx}: {e}")
+                continue
+        
+        pbar.close()
+        
+        # Check for early stopping trigger
+        if early_stopping_patience and patience_counter >= early_stopping_patience:
+            print("Stopping training due to early stopping.")
+            break
+        
+        # Update learning rate scheduler (once per epoch)
+        mine_model.scheduler.step()
+        
+        # Compute epoch statistics
+        avg_train_mi = np.mean(epoch_mi_values) if epoch_mi_values else 0.0
+        avg_train_loss = np.mean(epoch_loss_values) if epoch_loss_values else 0.0
+        mine_model.train_mi_history.append(avg_train_mi)
+        
+        # End-of-epoch validation (if not doing step-based validation)
+        if validate_per_epoch:
+            print(f"\n[Epoch {epoch}] Running validation...")
             avg_val_mi = mine_model.validate(valid_loader)
+            
             # Check if new best validation MI
-            if mine_model.best_val_mi == avg_val_mi and avg_val_mi != float('-inf'):
+            if avg_val_mi > mine_model.best_val_mi:
                 best_epoch = epoch
+                patience_counter = 0
                 # Save best model checkpoint
                 best_checkpoint_path = save_checkpoint(
-                    mine_model, epoch, mine_model.best_val_mi, 
+                    mine_model, epoch, global_step, mine_model.best_val_mi, 
                     checkpoint_dir, f"best_model.pth"
                 )
                 print(f"  * New best model saved at epoch {epoch}!")
-        except Exception as e:
-            print(f"\nError: Error occurred during validation Epoch {epoch} - {e}")
-            print("Will skip validation and logging for this Epoch.")
-            continue  # Go to next epoch
-
-        # --- Save periodic checkpoint ---
+            else:
+                patience_counter += 1
+                if early_stopping_patience and patience_counter >= early_stopping_patience:
+                    print(f"\nEarly stopping triggered after {patience_counter} epochs without improvement.")
+                    break
+        else:
+            # Get the latest validation MI for logging
+            avg_val_mi = mine_model.val_mi_history[-1] if mine_model.val_mi_history else 0.0
+        
+        # Save periodic checkpoint based on epochs
         if epoch % checkpoint_interval == 0:
             save_checkpoint(
-                mine_model, epoch, mine_model.best_val_mi,
+                mine_model, epoch, global_step, mine_model.best_val_mi,
                 checkpoint_dir, f"checkpoint_epoch_{epoch}.pth"
             )
-
+        
         epoch_time = time.time() - epoch_start_time
-
-        # --- Print logs ---
-        print(f"Epoch {epoch}/{epochs} | Time: {epoch_time:.2f}s | "
+        
+        # Print epoch summary
+        print(f"\nEpoch {epoch}/{epochs} | Time: {epoch_time:.2f}s | Steps: {steps_in_current_epoch} | "
               f"Train MI: {avg_train_mi:.6f} | Train Loss: {avg_train_loss:.6f} | "
               f"Val MI: {avg_val_mi:.6f} | Best Val MI: {mine_model.best_val_mi:.6f} (Epoch {best_epoch if best_epoch > 0 else 'N/A'})")
-
+        
         # Periodically print more detailed network statistics
         if epoch % log_interval == 0 or epoch == epochs:
             print("-" * 20 + f" Epoch {epoch} Stats " + "-" * 20)
@@ -268,7 +387,7 @@ def main(config_path):
 
     # Save final checkpoint
     save_checkpoint(
-        mine_model, epochs, mine_model.best_val_mi,
+        mine_model, epochs, global_step, mine_model.best_val_mi,
         checkpoint_dir, f"final_model_epoch_{epochs}.pth"
     )
 
@@ -285,7 +404,7 @@ def main(config_path):
     if best_checkpoint_path and os.path.exists(best_checkpoint_path):
         print(f"Loading best model from {best_checkpoint_path} for testing...")
         try:
-            _, _ = load_checkpoint(mine_model, best_checkpoint_path)
+            _, _, _ = load_checkpoint(mine_model, best_checkpoint_path)
             print("Best model loaded successfully.")
         except Exception as e:
             print(f"Error loading best model: {e}")
@@ -326,7 +445,7 @@ if __name__ == "__main__":
         # Print example configuration to help user create one
         print("\nYou can create a config.yaml file similar to the following:")
         example_config = """
-# config.yaml - MINE Training Configuration (Example)
+# config.yaml - MINE Training Configuration (Example with Context Window and Projection Layers)
 data:
   features_dir: './features'  # <<<--- Change to your feature .npy directory
   train_csv: './train_list.csv' # <<<--- Change to your train list CSV
@@ -334,6 +453,7 @@ data:
   test_csv: './test_list.csv'   # <<<--- Change to your test list CSV
   segment_length: 100       # Cropped sequence length
   normalization: 'standard' # Float feature normalization: none, minmax, standard, robust
+  context_frame_numbers: 3  # NEW: Number of consecutive frames for context (1 = disable)
   x_repeat: 1               # Repeat factor for x features (upsampling)
   y_repeat: 1               # Repeat factor for y features (upsampling)
   max_length_diff: 5        # Max difference between x and y lengths after repeat
@@ -344,8 +464,12 @@ model:
   y_type: 'float'           # 'float' or 'index'
   
   # --- Feature dimensions (for float type) ---
-  x_dim: 20                 # Dimension of x features when x_type='float'
-  y_dim: 40                 # Dimension of y features when y_type='float'
+  x_dim: 128                # Base dimension of x features when x_type='float'
+  y_dim: 256                # Base dimension of y features when y_type='float'
+  
+  # --- NEW: Projection dimensions (for dimensionality reduction) ---
+  x_proj_dim: 64            # Project effective x_dim to this dimension (only for float features)
+  y_proj_dim: 64            # Project effective y_dim to this dimension (only for float features)
   
   # --- Required for x_type='index' ---
   # x_vocab_size: 5000        # Size of vocabulary for x
@@ -356,10 +480,11 @@ model:
   # y_embedding_dim: 256      # Embedding dimension for y
 
   # --- Common MLP parameters ---
-  hidden_dims: [256, 256]   # Network hidden layer dimensions
+  hidden_dims: [128, 64]    # Network hidden layer dimensions (after projection/embedding)
   activation: 'relu'        # Activation function: relu, leaky_relu, elu
   batch_norm: True          # Whether to use BatchNorm
   dropout: 0.1              # Dropout rate (0 means none)
+  bias_correction_method: none
 
 training:
   epochs: 50                # Number of training epochs
@@ -368,6 +493,11 @@ training:
   device: 'cuda'            # Use 'cuda' or 'cpu'
   num_workers: 4            # Number of data loading processes (adjust for your machine)
   seed: 42                  # Random seed
+
+# NEW: Validation configuration for large datasets
+validation:
+  validate_every_n_steps: 1000  # Validate every N training steps (null = once per epoch)
+  early_stopping_patience: 10   # Stop if no improvement for N validations (null = no early stopping)
 
 checkpoint:
   dir: './checkpoints'      # Directory to save checkpoints

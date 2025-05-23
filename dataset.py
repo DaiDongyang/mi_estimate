@@ -1,6 +1,6 @@
 # dataset.py
 """
-Dataset module - Load preprocessed feature files, align, crop and normalize
+Dataset module - Load preprocessed feature files, align, crop and normalize with context window support
 """
 import os
 import time
@@ -12,14 +12,15 @@ import random
 import yaml  # For loading config
 
 class MIDataset(Dataset):
-    """Mutual Information dataset, loads preprocessed feature files"""
+    """Mutual Information dataset, loads preprocessed feature files with context window support"""
 
     def __init__(self, csv_path, features_dir, segment_length=None,
                  normalization='standard', seed=42, 
                  x_type='float', y_type='float',
                  x_repeat=1, y_repeat=1,
                  max_length_diff=5,
-                 x_dim=None, y_dim=None): 
+                 x_dim=None, y_dim=None,
+                 context_frame_numbers=1): 
         """
         Initialize dataset
         
@@ -35,6 +36,7 @@ class MIDataset(Dataset):
             y_repeat: Repeat factor for y features
             x_dim: Feature dimension for x (when x_type='float')
             y_dim: Feature dimension for y (when y_type='float')
+            context_frame_numbers: Number of consecutive frames to use as context (default=1 for no context)
         """
         self.features_dir = features_dir
         self.segment_length = segment_length
@@ -44,6 +46,7 @@ class MIDataset(Dataset):
         self.x_repeat = x_repeat
         self.y_repeat = y_repeat
         self.max_length_diff = max_length_diff
+        self.context_frame_numbers = context_frame_numbers
         
         # Set appropriate dtypes based on feature types
         self.x_dtype = torch.long if x_type == 'index' else torch.float32
@@ -69,13 +72,20 @@ class MIDataset(Dataset):
         
         # Track filtered samples
         self.filtered_samples = []
+        
+        # Print context information
+        if context_frame_numbers > 1:
+            print(f"Context window enabled: using {context_frame_numbers} consecutive frames")
+            print(f"  This will increase effective feature dimensions by {context_frame_numbers}x")
+        else:
+            print("Context window disabled: using single frame per time step")
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
         """
-        Get data sample, returns aligned and cropped tensors.
+        Get data sample, returns aligned and cropped tensors with optional context windows.
         The dtype of x_tensor is controlled by self.x_dtype.
         The dtype of y_tensor is controlled by self.y_dtype.
         """
@@ -224,21 +234,29 @@ class MIDataset(Dataset):
         )
         crop_end_time = time.time()
         
-        # Record cropped time steps
+        # Record cropped time steps (before context windowing)
         if self._time_steps is None:
             self._time_steps = x_cropped.shape[0]
+
+        # --- Apply context windowing ---
+        context_start_time = time.time()
+        if self.context_frame_numbers > 1:
+            x_context, y_context = self._apply_context_windowing(x_cropped, y_cropped)
+        else:
+            x_context, y_context = x_cropped, y_cropped
+        context_end_time = time.time()
 
         # --- Normalize (only for float features) ---
         norm_start_time = time.time()
         if self.x_type == 'float':
-            x_normalized = self._normalize_feature(x_cropped)
+            x_normalized = self._normalize_feature(x_context)
         else:
-            x_normalized = x_cropped  # No normalization for index features
+            x_normalized = x_context  # No normalization for index features
             
         if self.y_type == 'float':
-            y_normalized = self._normalize_feature(y_cropped)
+            y_normalized = self._normalize_feature(y_context)
         else:
-            y_normalized = y_cropped  # No normalization for index features
+            y_normalized = y_context  # No normalization for index features
             
         norm_end_time = time.time()
 
@@ -249,21 +267,82 @@ class MIDataset(Dataset):
         overall_end_time = time.time()
         io_time_ms = (io_end_time - io_start_time) * 1000
         crop_time_ms = (crop_end_time - crop_start_time) * 1000
+        context_time_ms = (context_end_time - context_start_time) * 1000
         norm_time_ms = (norm_end_time - norm_start_time) * 1000
         overall_time_ms = (overall_end_time - overall_start_time) * 1000
         
         # Print timing breakdown (can set a threshold, e.g., only print if total time > 50ms)
         # if overall_time_ms > 50:
-        #    print(f"Sample {idx} | Total: {overall_time_ms:.1f}ms | IO: {io_time_ms:.1f}ms | Crop: {crop_time_ms:.1f}ms | Norm: {norm_time_ms:.1f}ms")
+        #    print(f"Sample {idx} | Total: {overall_time_ms:.1f}ms | IO: {io_time_ms:.1f}ms | Crop: {crop_time_ms:.1f}ms | Context: {context_time_ms:.1f}ms | Norm: {norm_time_ms:.1f}ms")
 
         return x_tensor, y_tensor
+
+    def _apply_context_windowing(self, x, y):
+        """
+        Apply context windowing to create sliding windows of features
+        
+        Args:
+            x: x features array, shape [time, x_features] or [time] for index
+            y: y features array, shape [time, y_features] or [time] for index
+            
+        Returns:
+            x_context: Windowed x features, shape [valid_time, x_features * context_frame_numbers] or [valid_time, context_frame_numbers]
+            y_context: Windowed y features, shape [valid_time, y_features * context_frame_numbers] or [valid_time, context_frame_numbers]
+        """
+        seq_len = x.shape[0]
+        context_size = self.context_frame_numbers
+        
+        # Calculate valid sequence length after windowing
+        # We can only create windows where we have enough frames
+        valid_len = seq_len - context_size + 1
+        
+        if valid_len <= 0:
+            raise ValueError(f"Sequence length ({seq_len}) is too short for context window size ({context_size})")
+        
+        # Handle x features
+        if self.x_type == 'index':
+            # For index features: [time] -> [valid_time, context_frame_numbers]
+            x_windows = []
+            for i in range(valid_len):
+                window = x[i:i+context_size]  # [context_frame_numbers]
+                x_windows.append(window)
+            x_context = np.stack(x_windows, axis=0)  # [valid_time, context_frame_numbers]
+        else:
+            # For float features: [time, x_features] -> [valid_time, x_features * context_frame_numbers]
+            x_features = x.shape[1]
+            x_windows = []
+            for i in range(valid_len):
+                window = x[i:i+context_size, :]  # [context_frame_numbers, x_features]
+                window_flat = window.flatten()    # [x_features * context_frame_numbers]
+                x_windows.append(window_flat)
+            x_context = np.stack(x_windows, axis=0)  # [valid_time, x_features * context_frame_numbers]
+        
+        # Handle y features (same logic as x)
+        if self.y_type == 'index':
+            # For index features: [time] -> [valid_time, context_frame_numbers]
+            y_windows = []
+            for i in range(valid_len):
+                window = y[i:i+context_size]  # [context_frame_numbers]
+                y_windows.append(window)
+            y_context = np.stack(y_windows, axis=0)  # [valid_time, context_frame_numbers]
+        else:
+            # For float features: [time, y_features] -> [valid_time, y_features * context_frame_numbers]
+            y_features = y.shape[1]
+            y_windows = []
+            for i in range(valid_len):
+                window = y[i:i+context_size, :]  # [context_frame_numbers, y_features]
+                window_flat = window.flatten()    # [y_features * context_frame_numbers]
+                y_windows.append(window_flat)
+            y_context = np.stack(y_windows, axis=0)  # [valid_time, y_features * context_frame_numbers]
+        
+        return x_context, y_context
 
     def _normalize_feature(self, feature):
         """
         Vectorized feature normalization (only applicable for float features)
         
         Args:
-            feature: Feature array, shape [time, feature_dim]
+            feature: Feature array, shape [time, feature_dim] (may be expanded by context windowing)
             
         Returns:
             Normalized feature
@@ -346,6 +425,15 @@ class MIDataset(Dataset):
             length = min(len_x, len_y)
             # print(f"Using dynamic length: {length} (min of len_x={len_x}, len_y={len_y})")
 
+        # Adjust length for context windowing
+        # We need at least context_frame_numbers frames to create one window
+        if self.context_frame_numbers > 1:
+            # Make sure we have enough frames for at least one context window
+            min_required_length = self.context_frame_numbers
+            if length < min_required_length:
+                print(f"Warning: Segment length ({length}) < context_frame_numbers ({self.context_frame_numbers}), adjusting to {min_required_length}")
+                length = min_required_length
+
         # Handle shapes
         x_is_1d = (x.ndim == 1)
         y_is_1d = (y.ndim == 1)
@@ -413,11 +501,24 @@ class MIDataset(Dataset):
                 print(f"Error loading first sample to determine dimensions: {e}")
                 return None, None, None
         
-        # Return dimensions based on feature types
-        x_dim_to_return = self._x_dim if self.x_type == 'float' else None
-        y_dim_to_return = self._y_dim if self.y_type == 'float' else None
+        # Calculate effective dimensions after context windowing
+        if self.x_type == 'float':
+            effective_x_dim = self._x_dim * self.context_frame_numbers
+        else:
+            effective_x_dim = None  # Index features don't have traditional dimensions
+            
+        if self.y_type == 'float':
+            effective_y_dim = self._y_dim * self.context_frame_numbers
+        else:
+            effective_y_dim = None  # Index features don't have traditional dimensions
         
-        return x_dim_to_return, y_dim_to_return, self._time_steps
+        # Calculate effective time steps after context windowing
+        if self._time_steps is not None and self.context_frame_numbers > 1:
+            effective_time_steps = self._time_steps - self.context_frame_numbers + 1
+        else:
+            effective_time_steps = self._time_steps
+        
+        return effective_x_dim, effective_y_dim, effective_time_steps
 
 # --- Function to create DataLoaders ---
 def create_data_loaders(config_path):
@@ -445,6 +546,7 @@ def create_data_loaders(config_path):
 
     segment_length = data_config.get('segment_length', 100)
     normalization = data_config.get('normalization', 'standard')
+    context_frame_numbers = data_config.get('context_frame_numbers', 1)  # New parameter
     
     # Get feature types and repeat factors
     x_type = model_config.get('x_type', 'float')
@@ -470,35 +572,39 @@ def create_data_loaders(config_path):
         if key == 'features_dir' and not os.path.isdir(path):
             print(f"Warning: Features directory '{path}' does not exist.")
 
-    # Create datasets with configured dimensions
+    # Create datasets with configured dimensions and context window
     print(f"Creating datasets (x_type: {x_type}, y_type: {y_type}, x_repeat: {x_repeat}, y_repeat: {y_repeat})...")
     print(f"Configured dimensions: x_dim={x_dim}, y_dim={y_dim}")
+    print(f"Context frame numbers: {context_frame_numbers}")
     
     train_dataset = MIDataset(
         data_config['train_csv'], data_config['features_dir'],
         segment_length=segment_length, normalization=normalization, seed=seed,
         x_type=x_type, y_type=y_type, x_repeat=x_repeat, y_repeat=y_repeat,
-        max_length_diff=max_length_diff, x_dim=x_dim, y_dim=y_dim
+        max_length_diff=max_length_diff, x_dim=x_dim, y_dim=y_dim,
+        context_frame_numbers=context_frame_numbers
     )
     valid_dataset = MIDataset(
         data_config['valid_csv'], data_config['features_dir'],
         segment_length=segment_length, normalization=normalization, seed=seed,
         x_type=x_type, y_type=y_type, x_repeat=x_repeat, y_repeat=y_repeat,
-        max_length_diff=max_length_diff, x_dim=x_dim, y_dim=y_dim
+        max_length_diff=max_length_diff, x_dim=x_dim, y_dim=y_dim,
+        context_frame_numbers=context_frame_numbers
     )
     test_dataset = MIDataset(
         data_config['test_csv'], data_config['features_dir'],
         segment_length=None, normalization=normalization, seed=seed,
         x_type=x_type, y_type=y_type, x_repeat=x_repeat, y_repeat=y_repeat,
-        max_length_diff=max_length_diff, x_dim=x_dim, y_dim=y_dim
+        max_length_diff=max_length_diff, x_dim=x_dim, y_dim=y_dim,
+        context_frame_numbers=context_frame_numbers
     )
 
-    # Get dimension information (configured or detected)
+    # Get dimension information (configured or detected, with context windowing applied)
     detected_x_dim, detected_y_dim, seq_len = train_dataset.get_dims()
     
-    # Use configured dimensions if provided, otherwise use detected ones
-    final_x_dim = x_dim if x_dim is not None else detected_x_dim
-    final_y_dim = y_dim if y_dim is not None else detected_y_dim
+    # Use configured dimensions if provided, otherwise use detected ones (already includes context)
+    final_x_dim = x_dim * context_frame_numbers if x_dim is not None and x_type == 'float' else detected_x_dim
+    final_y_dim = y_dim * context_frame_numbers if y_dim is not None and y_type == 'float' else detected_y_dim
     
     # Validate dimensions based on feature types
     if x_type == 'float' and final_x_dim is None:
@@ -510,22 +616,39 @@ def create_data_loaders(config_path):
     print("Dataset and dimension information:")
     if x_type == 'index' and y_type == 'index':
         print(f"  Feature types: X=Index (Long), Y=Index (Long)")
-        print(f"  Feature dimensions: Both are indices")
+        if context_frame_numbers > 1:
+            print(f"  Context dimensions: X=[context, {context_frame_numbers}], Y=[context, {context_frame_numbers}]")
+        else:
+            print(f"  Feature dimensions: Both are indices")
     elif x_type == 'index':
         print(f"  Feature types: X=Index (Long), Y=Float")
         y_dim_source = "config" if y_dim is not None else "data"
-        print(f"  Feature dimensions: Y={final_y_dim} (from {y_dim_source})")
+        if context_frame_numbers > 1:
+            base_y_dim = y_dim if y_dim is not None else detected_y_dim // context_frame_numbers
+            print(f"  Context dimensions: X=[context, {context_frame_numbers}], Y={final_y_dim} (base: {base_y_dim} × {context_frame_numbers}, from {y_dim_source})")
+        else:
+            print(f"  Feature dimensions: Y={final_y_dim} (from {y_dim_source})")
     elif y_type == 'index':
         print(f"  Feature types: X=Float, Y=Index (Long)")
         x_dim_source = "config" if x_dim is not None else "data"
-        print(f"  Feature dimensions: X={final_x_dim} (from {x_dim_source})")
+        if context_frame_numbers > 1:
+            base_x_dim = x_dim if x_dim is not None else detected_x_dim // context_frame_numbers
+            print(f"  Context dimensions: X={final_x_dim} (base: {base_x_dim} × {context_frame_numbers}, from {x_dim_source}), Y=[context, {context_frame_numbers}]")
+        else:
+            print(f"  Feature dimensions: X={final_x_dim} (from {x_dim_source})")
     else:
         print(f"  Feature types: X=Float, Y=Float")
         x_dim_source = "config" if x_dim is not None else "data"
         y_dim_source = "config" if y_dim is not None else "data"
-        print(f"  Feature dimensions: X={final_x_dim} (from {x_dim_source}), Y={final_y_dim} (from {y_dim_source})")
+        if context_frame_numbers > 1:
+            base_x_dim = x_dim if x_dim is not None else detected_x_dim // context_frame_numbers
+            base_y_dim = y_dim if y_dim is not None else detected_y_dim // context_frame_numbers
+            print(f"  Context dimensions: X={final_x_dim} (base: {base_x_dim} × {context_frame_numbers}, from {x_dim_source}), Y={final_y_dim} (base: {base_y_dim} × {context_frame_numbers}, from {y_dim_source})")
+        else:
+            print(f"  Feature dimensions: X={final_x_dim} (from {x_dim_source}), Y={final_y_dim} (from {y_dim_source})")
     
     print(f"  Cropped sequence length: {seq_len}")
+    print(f"  Context frame numbers: {context_frame_numbers}")
     print(f"  Repeat factors: X={x_repeat}, Y={y_repeat}")
     print(f"  Length difference threshold: max(x_repeat, y_repeat) = {max(x_repeat, y_repeat)}")
     print(f"  Normalization method (Float): {normalization}")

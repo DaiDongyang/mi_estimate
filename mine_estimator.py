@@ -1,6 +1,6 @@
 # mine_estimator.py
 """
-MINE mutual information estimator
+MINE mutual information estimator with projection layer support
 """
 import torch
 import torch.optim as optim
@@ -14,27 +14,32 @@ from mine_network import (
 )
 
 class MINE:
-    """Mutual Information Neural Estimator for I(X;Y)"""
+    """Mutual Information Neural Estimator for I(X;Y) with projection layer support"""
 
     def __init__(self, x_type='float', y_type='float',
                  x_dim=None, y_dim=None,
                  x_vocab_size=None, x_embedding_dim=None,
                  y_vocab_size=None, y_embedding_dim=None,
+                 x_proj_dim=None, y_proj_dim=None,
+                 context_frame_numbers=1,
                  hidden_dims=[128, 64], activation="relu", 
                  batch_norm=True, dropout=0.1,
                  lr=1e-4, device="cuda"):
         """
-        Initialize MINE estimator
+        Initialize MINE estimator with optional projection layers and context window support
         
         Args:
             x_type: Type of X feature ('float' or 'index')
             y_type: Type of Y feature ('float' or 'index')
-            x_dim: X feature dimension (required when x_type='float')
-            y_dim: Y feature dimension (required when y_type='float')
+            x_dim: X feature dimension (required when x_type='float', may include context expansion)
+            y_dim: Y feature dimension (required when y_type='float', may include context expansion)
             x_vocab_size: X vocabulary size (required when x_type='index')
-            x_embedding_dim: X embedding dimension (required when x_type='index')
+            x_embedding_dim: X embedding dimension (required when x_type='index', single frame)
             y_vocab_size: Y vocabulary size (required when y_type='index')
-            y_embedding_dim: Y embedding dimension (required when y_type='index')
+            y_embedding_dim: Y embedding dimension (required when y_type='index', single frame)
+            x_proj_dim: X projection dimension (only used when x_type='float')
+            y_proj_dim: Y projection dimension (only used when y_type='float')
+            context_frame_numbers: Number of context frames (affects index embedding dimensions)
             hidden_dims: List of hidden layer dimensions for MINE network
             activation: Activation function
             batch_norm: Whether to use batch normalization
@@ -46,42 +51,71 @@ class MINE:
         print(f"MINE Estimator using device: {self.device}")
         self.x_type = x_type
         self.y_type = y_type
+        self.context_frame_numbers = context_frame_numbers
 
         # --- Create appropriate MINE network based on feature types ---
         if x_type == 'float' and y_type == 'float':
             if x_dim is None or y_dim is None:
                 raise ValueError("x_dim and y_dim must be provided for x_type='float' and y_type='float'")
-            print(f"Initializing MINENetworkFloatFloat (x_dim={x_dim}, y_dim={y_dim})")
+            
+            # Print projection info
+            proj_info = []
+            if x_proj_dim is not None:
+                proj_info.append(f"x_proj_dim={x_proj_dim}")
+            if y_proj_dim is not None:
+                proj_info.append(f"y_proj_dim={y_proj_dim}")
+            proj_str = f" with projections ({', '.join(proj_info)})" if proj_info else ""
+            
+            print(f"Initializing MINENetworkFloatFloat (x_dim={x_dim}, y_dim={y_dim}){proj_str}")
             self.mine_net = MINENetworkFloatFloat(
-                x_dim, y_dim, hidden_dims, activation, batch_norm, dropout
+                x_dim, y_dim, hidden_dims, activation, batch_norm, dropout,
+                x_proj_dim=x_proj_dim, y_proj_dim=y_proj_dim
             ).to(self.device)
             
         elif x_type == 'index' and y_type == 'float':
             if x_vocab_size is None or x_embedding_dim is None or y_dim is None:
                 raise ValueError("x_vocab_size, x_embedding_dim, and y_dim must be provided for x_type='index' and y_type='float'")
-            print(f"Initializing MINENetworkIndexFloat (x_vocab={x_vocab_size}, x_embed_dim={x_embedding_dim}, y_dim={y_dim})")
+            
+            proj_str = f" with y_proj_dim={y_proj_dim}" if y_proj_dim is not None else ""
+            context_str = f" with context_frames={context_frame_numbers}" if context_frame_numbers > 1 else ""
+            print(f"Initializing MINENetworkIndexFloat (x_vocab={x_vocab_size}, x_embed_dim={x_embedding_dim}, y_dim={y_dim}){proj_str}{context_str}")
             self.mine_net = MINENetworkIndexFloat(
-                x_vocab_size, x_embedding_dim, y_dim, hidden_dims, activation, batch_norm, dropout
+                x_vocab_size, x_embedding_dim, y_dim, hidden_dims, activation, batch_norm, dropout,
+                y_proj_dim=y_proj_dim, context_frame_numbers=context_frame_numbers
             ).to(self.device)
             
         elif x_type == 'float' and y_type == 'index':
             if x_dim is None or y_vocab_size is None or y_embedding_dim is None:
                 raise ValueError("x_dim, y_vocab_size, and y_embedding_dim must be provided for x_type='float' and y_type='index'")
-            print(f"Initializing MINENetworkFloatIndex (x_dim={x_dim}, y_vocab={y_vocab_size}, y_embed_dim={y_embedding_dim})")
+            
+            proj_str = f" with x_proj_dim={x_proj_dim}" if x_proj_dim is not None else ""
+            context_str = f" with context_frames={context_frame_numbers}" if context_frame_numbers > 1 else ""
+            print(f"Initializing MINENetworkFloatIndex (x_dim={x_dim}, y_vocab={y_vocab_size}, y_embed_dim={y_embedding_dim}){proj_str}{context_str}")
             self.mine_net = MINENetworkFloatIndex(
-                x_dim, y_vocab_size, y_embedding_dim, hidden_dims, activation, batch_norm, dropout
+                x_dim, y_vocab_size, y_embedding_dim, hidden_dims, activation, batch_norm, dropout,
+                x_proj_dim=x_proj_dim, context_frame_numbers=context_frame_numbers
             ).to(self.device)
             
         elif x_type == 'index' and y_type == 'index':
             if x_vocab_size is None or x_embedding_dim is None or y_vocab_size is None or y_embedding_dim is None:
                 raise ValueError("x_vocab_size, x_embedding_dim, y_vocab_size, and y_embedding_dim must be provided for x_type='index' and y_type='index'")
-            print(f"Initializing MINENetworkIndexIndex (x_vocab={x_vocab_size}, x_embed_dim={x_embedding_dim}, y_vocab={y_vocab_size}, y_embed_dim={y_embedding_dim})")
+            
+            context_str = f" with context_frames={context_frame_numbers}" if context_frame_numbers > 1 else ""
+            print(f"Initializing MINENetworkIndexIndex (x_vocab={x_vocab_size}, x_embed_dim={x_embedding_dim}, y_vocab={y_vocab_size}, y_embed_dim={y_embedding_dim}){context_str}")
+            print("  Note: Index features use embeddings for dimensionality control, no additional projection needed")
             self.mine_net = MINENetworkIndexIndex(
-                x_vocab_size, x_embedding_dim, y_vocab_size, y_embedding_dim, hidden_dims, activation, batch_norm, dropout
+                x_vocab_size, x_embedding_dim, y_vocab_size, y_embedding_dim, hidden_dims, activation, batch_norm, dropout,
+                context_frame_numbers=context_frame_numbers
             ).to(self.device)
             
         else:
             raise ValueError(f"Unsupported feature types: x_type={x_type}, y_type={y_type}. Choose 'float' or 'index'.")
+
+        # Print parameter count
+        total_params = sum(p.numel() for p in self.mine_net.parameters())
+        trainable_params = sum(p.numel() for p in self.mine_net.parameters() if p.requires_grad)
+        print(f"  Total parameters: {total_params:,}")
+        print(f"  Trainable parameters: {trainable_params:,}")
 
         # Optimizer
         self.optimizer = optim.AdamW(
@@ -112,15 +146,17 @@ class MINE:
         Compute mutual information estimate (Donsker-Varadhan lower bound)
         
         Args:
-            x_joint: Joint distribution X samples, shape [B, S, Dx] (float) or [B, S] (long)
-            y_joint: Joint distribution Y samples, shape [B, S, Dy] (float) or [B, S] (long)
+            x_joint: Joint distribution X samples, shape [B, S, Dx] (float) or [B, S] (long) or [B, Dx] (context-expanded float) or [B, context_frames] (context-expanded index)
+            y_joint: Joint distribution Y samples, shape [B, S, Dy] (float) or [B, S] (long) or [B, Dy] (context-expanded float) or [B, context_frames] (context-expanded index)
             
         Returns:
             Mutual information estimate (scalar Tensor) and intermediate values for bias correction
         """
         # --- 1. Generate y_marginal ---
-        # Create marginal samples y' by shuffling y_joint along the N=B*S dimension
-        if y_joint.dim() == 3:  # [B, S, Dy]
+        # Create marginal samples y' by shuffling y_joint along the batch dimension
+        # The shuffling strategy needs to handle different tensor shapes from context windowing
+        
+        if y_joint.dim() == 3:  # [B, S, Dy] - sequential float features
             B, S, Dy = y_joint.shape
             N = B * S
             y_joint_flat = y_joint.reshape(N, Dy)
@@ -128,30 +164,27 @@ class MINE:
             y_marginal_flat = y_joint_flat[shuffle_idx]
             # Reshape y_marginal back to original shape
             y_marginal = y_marginal_flat.reshape(B, S, Dy)
-        elif y_joint.dim() == 2 and self.y_type == 'float':  # [B, Dy] - non-sequential case
-            N = y_joint.shape[0]
-            shuffle_idx = torch.randperm(N).to(self.device)
+        elif y_joint.dim() == 2:
+            if self.y_type == 'float':
+                # [B, Dy] - non-sequential float features (possibly context-expanded)
+                B, Dy = y_joint.shape
+                shuffle_idx = torch.randperm(B).to(self.device)
+                y_marginal = y_joint[shuffle_idx]
+            else:
+                # [B, S] - sequential index features or [B, context_frames] - context-expanded index features
+                B, S = y_joint.shape
+                shuffle_idx = torch.randperm(B).to(self.device)
+                y_marginal = y_joint[shuffle_idx]
+        elif y_joint.dim() == 1:  # [B] - non-sequential index features
+            B = y_joint.shape[0]
+            shuffle_idx = torch.randperm(B).to(self.device)
             y_marginal = y_joint[shuffle_idx]
-            # Check if x dimensions match
-            if not (x_joint.dim() == 2 and x_joint.shape[0] == N) and not (x_joint.dim() == 1 and x_joint.shape[0] == N):
-                raise ValueError("Shape mismatch between x_joint and y_joint for non-sequential case")
-        elif y_joint.dim() == 2 and self.y_type == 'index':  # [B, S] - sequential indices
-            B, S = y_joint.shape
-            N = B * S
-            y_joint_flat = y_joint.reshape(N)
-            shuffle_idx = torch.randperm(N).to(self.device)
-            y_marginal_flat = y_joint_flat[shuffle_idx]
-            # Reshape y_marginal back to original shape
-            y_marginal = y_marginal_flat.reshape(B, S)
-        elif y_joint.dim() == 1:  # [B] - non-sequential indices
-            N = y_joint.shape[0]
-            shuffle_idx = torch.randperm(N).to(self.device)
-            y_marginal = y_joint[shuffle_idx]
-            # Check if x dimensions match
-            if not (x_joint.dim() == 1 and x_joint.shape[0] == N) and not (x_joint.dim() == 2 and x_joint.shape[0] == N):
-                raise ValueError("Shape mismatch between x_joint and y_joint for non-sequential case")
         else:
             raise ValueError(f"Unsupported y_joint dimension: {y_joint.dim()}")
+
+        # Verify x and y have compatible shapes
+        if x_joint.shape[0] != y_joint.shape[0]:
+            raise ValueError(f"Batch size mismatch: x_joint batch size {x_joint.shape[0]} != y_joint batch size {y_joint.shape[0]}")
 
         # --- 2. Compute network outputs ---
         # The network forward method handles reshaping internally, returns [N, 1]

@@ -1,6 +1,6 @@
-# config.yaml - MINE Training Configuration Example
+# config.yaml - MINE Training Configuration with Context Window and Projection Layers
 data:
-  # Data paths
+  # Data paths - UPDATE THESE PATHS TO YOUR DATA
   train_csv: "/path/to/datasets/features/csv/train.csv"
   valid_csv: "/path/to/datasets/features/csv/valid.csv"
   test_csv: "/path/to/datasets/features/csv/test.csv"
@@ -9,6 +9,17 @@ data:
   # Feature parameters
   segment_length: 200       # Cropped sequence length
   normalization: 'standard' # Float feature normalization: none, minmax, standard, robust
+  
+  context_frame_numbers: 3  # Number of consecutive frames to use as context
+  # context_frame_numbers: 1  # Set to 1 to disable context (original behavior)
+  
+  # Example of context windowing:
+  # If context_frame_numbers = 3:
+  # - Original: [x1, x2, x3, x4, x5] and [y1, y2, y3, y4, y5]
+  # - After windowing: 
+  #   * Sample 1: [x1,x2,x3] concatenated as one vector, [y1,y2,y3] concatenated as one vector
+  #   * Sample 2: [x2,x3,x4] concatenated as one vector, [y2,y3,y4] concatenated as one vector
+  #   * Sample 3: [x3,x4,x5] concatenated as one vector, [y3,y4,y5] concatenated as one vector
   
   # Upsampling factors - supports different sampling rates between x and y
   x_repeat: 2               # Repeat factor for x features (upsampling), e.g., 10ms -> 20ms
@@ -20,28 +31,52 @@ data:
 
 model:
   # Feature types - various combinations are supported:
-  # Option 1: Both floating point features
+  # Option 1: Both floating point features (RECOMMENDED FOR PROJECTION + CONTEXT)
   x_type: 'float'          # Source features are continuous (float)
   y_type: 'float'          # Target features are continuous (float)
   
-  # Option 2: Source is index, target is float
+  # Option 2: Source is index, target is float (Y projection available, context windowing supported)
   # x_type: 'index'        # Source features are discrete indices (long)
   # y_type: 'float'        # Target features are continuous (float)
   
-  # Option 3: Source is float, target is index
+  # Option 3: Source is float, target is index (X projection available, context windowing supported)
   # x_type: 'float'        # Source features are continuous (float)
   # y_type: 'index'        # Target features are discrete indices (long)
   
-  # Option 4: Both index features
+  # Option 4: Both index features (Context windowing supported, no projection needed)
   # x_type: 'index'        # Source features are discrete indices (long)
   # y_type: 'index'        # Target features are discrete indices (long)
   
   # --- Feature dimensions (for float type) ---
-  # You can specify these explicitly or let them be detected from data
-  x_dim: 20                # Dimension of x features when x_type='float'
-  y_dim: 40                # Dimension of y features when y_type='float'
+  # Original feature dimensions (detected from data if not specified)
+  x_dim: 128               # Base dimension of x features when x_type='float'
+  y_dim: 256               # Base dimension of y features when y_type='float'
   
-  # --- Required parameters for index features ---
+  # IMPORTANT: With context_frame_numbers=3, the effective dimensions become:
+  # - Effective x_dim = 128 * 3 = 384
+  # - Effective y_dim = 256 * 3 = 768
+  # - Total input to MLP = 384 + 768 = 1152 (before projection)
+  
+  # --- NEW: Projection dimensions for reducing overfitting ---
+  # These create additional layers that project high-dimensional features to lower dimensions
+  # before concatenation and MLP processing. This reduces model parameters and overfitting.
+  
+  x_proj_dim: 32          # Project effective x_dim (128*3=384) to 32 dimensions
+  y_proj_dim: 32           # Project effective y_dim (256*3=768) to 32 dimensions
+  
+  # Projection flow with context:
+  # x: [batch, 128*3] -> projection -> [batch, 64]
+  # y: [batch, 256*3] -> projection -> [batch, 64] 
+  # concat: [batch, 128] -> MLP -> [batch, 1]
+  # 
+  # Without projection: [batch, 1152] -> MLP -> [batch, 1] (very large!)
+  # With projection: [batch, 128] -> MLP -> [batch, 1] (9x reduction!)
+  
+  # Set to null to disable projection for that feature:
+  # x_proj_dim: null       # No projection for x (not recommended with context)
+  # y_proj_dim: null       # No projection for y (not recommended with context)
+  
+  # --- Required parameters for index features (when using index types) ---
   # Vocabulary size and embedding dimension for x (required when x_type='index')
   x_vocab_size: 5000       # Size of vocabulary for x 
   x_embedding_dim: 256     # Embedding dimension for x
@@ -50,22 +85,31 @@ model:
   y_vocab_size: 2000       # Size of vocabulary for y
   y_embedding_dim: 128     # Embedding dimension for y
   
+  # NOTE: For index features with context, the effective input to MLP will be:
+  # - x_embedding_dim * context_frame_numbers + y_embedding_dim * context_frame_numbers
+  # - Example: 256*3 + 128*3 = 1152 dimensions (when both are index features)
+  
   # --- Neural network architecture ---
-  hidden_dims: [64]  # Network hidden layer dimensions
+  # With projection + context, you can still use reasonably sized hidden layers
+  hidden_dims: [64, 32]   # Network hidden layer dimensions
   activation: 'relu'       # Activation function: relu, leaky_relu, elu
-  batch_norm: True         # Whether to use BatchNorm
-  dropout: 0.5             # Dropout rate (0 means none)
+  batch_norm: False         # Whether to use BatchNorm
+  dropout: 0.2             # Dropout rate (can be higher due to projection)
   bias_correction_method: none
 
 training:
   epochs: 100              # Number of training epochs
-  batch_size: 128          # Batch size
-  lr: 0.0001               # Learning rate
+  batch_size: 64          # May need to reduce batch size due to increased memory usage
+  lr: 0.001                # Learning rate
   device: 'cuda'           # Use 'cuda' or 'cpu'
   num_workers: 16          # Number of data loading processes
   seed: 42                 # Random seed
 
-# New checkpoint configuration section
+validation:
+  validate_every_n_steps: 300  # Validate every N training steps (null = once per epoch)
+  early_stopping_patience: 30   # Stop if no improvement for N validations (null = no early stopping)
+
+# Checkpoint configuration section
 checkpoint:
   dir: './checkpoints'     # Directory to save checkpoints
   save_interval: 10        # Save checkpoint every N epochs
@@ -73,3 +117,98 @@ checkpoint:
 
 logging:
   log_interval: 5          # Print detailed statistics every this many epochs
+
+# --- CONTEXT WINDOW CONFIGURATION EXAMPLES ---
+
+# Example 1: Small context window (captures immediate temporal dependencies)
+# data:
+#   context_frame_numbers: 2
+#   segment_length: 200
+# model:
+#   x_dim: 128              # Base: 128, Effective: 128*2=256
+#   y_dim: 256              # Base: 256, Effective: 256*2=512
+#   x_proj_dim: 32          # Project 256 -> 32
+#   y_proj_dim: 32          # Project 512 -> 32
+#   hidden_dims: [64, 32]   # Small MLP, input = 32+32=64
+
+# Example 2: Medium context window (captures short-term patterns)
+# data:
+#   context_frame_numbers: 5
+#   segment_length: 200
+# model:
+#   x_dim: 64               # Base: 64, Effective: 64*5=320
+#   y_dim: 128              # Base: 128, Effective: 128*5=640
+#   x_proj_dim: 48          # Project 320 -> 48
+#   y_proj_dim: 48          # Project 640 -> 48
+#   hidden_dims: [128, 64]  # MLP input = 48+48=96
+
+# Example 3: Large context window (captures long-term dependencies)
+# data:
+#   context_frame_numbers: 10
+#   segment_length: 200
+# model:
+#   x_dim: 32               # Base: 32, Effective: 32*10=320
+#   y_dim: 64               # Base: 64, Effective: 64*10=640
+#   x_proj_dim: 32          # Project 320 -> 32
+#   y_proj_dim: 32          # Project 640 -> 32
+#   hidden_dims: [64, 32]   # MLP input = 32+32=64
+
+# Example 4: Mixed feature types with context
+# data:
+#   context_frame_numbers: 3
+# model:
+#   x_type: 'index'         # Index features
+#   y_type: 'float'         # Float features
+#   x_vocab_size: 10000
+#   x_embedding_dim: 128    # Effective: 128*3=384 (no projection for index)
+#   y_dim: 256              # Base: 256, Effective: 256*3=768
+#   y_proj_dim: 64          # Project 768 -> 64
+#   hidden_dims: [256, 128] # MLP input = 384+64=448
+
+# Example 5: Disable context (original behavior)
+# data:
+#   context_frame_numbers: 1  # No context windowing
+# model:
+#   x_dim: 512              # Original dimensions
+#   y_dim: 1024
+#   x_proj_dim: 64          # Still beneficial for dimensionality reduction
+#   y_proj_dim: 64
+#   hidden_dims: [128, 64]  # MLP input = 64+64=128
+
+# Example 6: High-dimensional features with heavy projection
+# data:
+#   context_frame_numbers: 2
+# model:
+#   x_dim: 1024             # Very high-dimensional input
+#   y_dim: 2048             # Very high-dimensional input
+#   x_proj_dim: 32          # Strong projection: 1024*2=2048 -> 32 (64x reduction!)
+#   y_proj_dim: 32          # Strong projection: 2048*2=4096 -> 32 (128x reduction!)
+#   hidden_dims: [64, 32]   # Small MLP since input is only 64 dimensions
+
+# --- PERFORMANCE TUNING GUIDELINES ---
+
+# Memory Optimization:
+# - Reduce batch_size if running out of GPU memory
+# - Use smaller context_frame_numbers for very high-dimensional features
+# - Consider using mixed precision training (not implemented in this version)
+
+# Model Complexity Control:
+# - Use projection layers when context_frame_numbers > 1
+# - Adjust projection dimensions based on available compute resources
+# - Increase dropout rate for larger models to prevent overfitting
+
+# Training Stability:
+# - Start with smaller learning rates when using context windows
+# - Monitor gradient norms and reduce learning rate if they explode
+# - Use gradient clipping (already implemented in the code)
+
+# Context Window Selection:
+# - Start with small context windows (2-3 frames) and gradually increase
+# - Monitor validation performance to find optimal context size
+# - Consider the temporal characteristics of your data (how far back dependencies exist)
+
+# Projection Dimension Guidelines:
+# - For context_frame_numbers=2: proj_dim = original_dim // 2 to original_dim
+# - For context_frame_numbers=3-5: proj_dim = original_dim // 4 to original_dim // 2  
+# - For context_frame_numbers>5: proj_dim = original_dim // 8 to original_dim // 4
+# - Always ensure proj_dim >= 16 for reasonable expressiveness

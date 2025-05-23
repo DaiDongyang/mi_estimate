@@ -113,8 +113,10 @@ def main(config_path):
         train_loader = data_info['train_loader']
         valid_loader = data_info['valid_loader']
         test_loader = data_info['test_loader']
-        x_dim = data_info['x_dim']  # Might be None for index type
-        y_dim = data_info['y_dim']  # Might be None for index type
+        # x_dim and y_dim from data_info are the effective dimensions,
+        # already considering context_frame_numbers.
+        effective_x_dim = data_info['x_dim']
+        effective_y_dim = data_info['y_dim']
         print("Data loaders created successfully.")
     except (FileNotFoundError, ValueError, RuntimeError, KeyError) as e:
         print(f"Error: Failed to create data loaders - {e}")
@@ -122,7 +124,7 @@ def main(config_path):
         return
 
     # --- 3. Initialize MINE model ---
-    # Get feature types and dimensions from configuration
+    # Get feature types from configuration
     x_type = model_config.get('x_type', 'float')
     y_type = model_config.get('y_type', 'float')
     bias_correction_method = model_config.get('bias_correction_method', 'none')
@@ -137,27 +139,23 @@ def main(config_path):
     y_vocab_size = model_config.get('y_vocab_size')
     y_embedding_dim = model_config.get('y_embedding_dim')
     
-    # Projection dimensions (new feature)
+    # Projection dimensions
     x_proj_dim = model_config.get('x_proj_dim')
     y_proj_dim = model_config.get('y_proj_dim')
     
-    # Feature dimensions
-    config_x_dim = model_config.get('x_dim')
-    config_y_dim = model_config.get('y_dim')
-    
-    # Use configured dimensions if provided, otherwise use detected ones
-    final_x_dim = config_x_dim if config_x_dim is not None else x_dim
-    final_y_dim = config_y_dim if config_y_dim is not None else y_dim
-
     print(f"Preparing to initialize MINE model (x_type: {x_type}, y_type: {y_type})...")
-    print(f"Feature dimensions: x_dim={final_x_dim}, y_dim={final_y_dim}")
+    # Use effective_x_dim and effective_y_dim obtained from create_data_loaders
+    # These dimensions already account for context_frame_numbers
+    print(f"Effective feature dimensions for MINE: x_dim={effective_x_dim}, y_dim={effective_y_dim}")
     print(f"Context frame numbers: {context_frame_numbers}")
     
     # Print projection info if available
     if x_proj_dim is not None and x_type == 'float':
-        print(f"X projection: {final_x_dim} -> {x_proj_dim}")
+        # The input to projection will be effective_x_dim
+        print(f"X projection: {effective_x_dim} -> {x_proj_dim}")
     if y_proj_dim is not None and y_type == 'float':
-        print(f"Y projection: {final_y_dim} -> {y_proj_dim}")
+        # The input to projection will be effective_y_dim
+        print(f"Y projection: {effective_y_dim} -> {y_proj_dim}")
     
     # Check required parameters based on feature types
     if x_type == 'index' and (x_vocab_size is None or x_embedding_dim is None):
@@ -168,11 +166,11 @@ def main(config_path):
         print("Error: When y_type='index', you must specify model.y_vocab_size and model.y_embedding_dim in config.yaml")
         return
         
-    if x_type == 'float' and final_x_dim is None:
+    if x_type == 'float' and effective_x_dim is None:
         print("Error: Could not determine x_dim for float features.")
         return
         
-    if y_type == 'float' and final_y_dim is None:
+    if y_type == 'float' and effective_y_dim is None:
         print("Error: Could not determine y_dim for float features.")
         return
 
@@ -180,8 +178,8 @@ def main(config_path):
         mine_model = MINE(
             x_type=x_type,
             y_type=y_type,
-            x_dim=final_x_dim,
-            y_dim=final_y_dim,
+            x_dim=effective_x_dim, # Pass the context-aware dimension
+            y_dim=effective_y_dim, # Pass the context-aware dimension
             x_vocab_size=x_vocab_size,
             x_embedding_dim=x_embedding_dim,
             y_vocab_size=y_vocab_size,
@@ -303,19 +301,19 @@ def main(config_path):
                         if early_stopping_patience and patience_counter >= early_stopping_patience:
                             print(f"\nEarly stopping triggered after {patience_counter} validations without improvement.")
                             pbar.close()
-                            break
+                            break # break from batch loop
                     
                     # Save periodic checkpoint based on steps
-                    if global_step % (validate_every_n_steps * checkpoint_interval) == 0:
+                    if global_step % (validate_every_n_steps * checkpoint_interval) == 0: # This logic might need adjustment if save_interval is epoch-based
                         save_checkpoint(
                             mine_model, epoch, global_step, mine_model.best_val_mi,
                             checkpoint_dir, f"checkpoint_step_{global_step}.pth"
                         )
                     
                     # Print current statistics
-                    avg_train_mi = np.mean(epoch_mi_values) if epoch_mi_values else 0.0
-                    avg_train_loss = np.mean(epoch_loss_values) if epoch_loss_values else 0.0
-                    print(f"  Step {global_step} | Train MI: {avg_train_mi:.6f} | Train Loss: {avg_train_loss:.6f} | "
+                    avg_train_mi_so_far = np.mean(epoch_mi_values) if epoch_mi_values else 0.0
+                    avg_train_loss_so_far = np.mean(epoch_loss_values) if epoch_loss_values else 0.0
+                    print(f"  Step {global_step} | Train MI (epoch avg): {avg_train_mi_so_far:.6f} | Train Loss (epoch avg): {avg_train_loss_so_far:.6f} | "
                           f"Val MI: {avg_val_mi:.6f} | Best Val MI: {mine_model.best_val_mi:.6f}")
                     
                     # Return to training mode
@@ -323,14 +321,15 @@ def main(config_path):
                     
             except Exception as e:
                 print(f"\nError in batch {batch_idx}: {e}")
-                continue
+                # Optionally, re-raise if debugging is needed: raise e
+                continue # continue to next batch
         
         pbar.close()
         
-        # Check for early stopping trigger
+        # Check for early stopping trigger from inner loop
         if early_stopping_patience and patience_counter >= early_stopping_patience:
-            print("Stopping training due to early stopping.")
-            break
+            print("Stopping training due to early stopping (detected after batch loop).")
+            break # break from epoch loop
         
         # Update learning rate scheduler (once per epoch)
         mine_model.scheduler.step()
@@ -340,9 +339,9 @@ def main(config_path):
         avg_train_loss = np.mean(epoch_loss_values) if epoch_loss_values else 0.0
         mine_model.train_mi_history.append(avg_train_mi)
         
-        # End-of-epoch validation (if not doing step-based validation)
+        # End-of-epoch validation (if not doing step-based validation, or if step-based didn't trigger early stop)
         if validate_per_epoch:
-            print(f"\n[Epoch {epoch}] Running validation...")
+            print(f"\n[Epoch {epoch}] Running end-of-epoch validation...")
             avg_val_mi = mine_model.validate(valid_loader)
             
             # Check if new best validation MI
@@ -359,9 +358,9 @@ def main(config_path):
                 patience_counter += 1
                 if early_stopping_patience and patience_counter >= early_stopping_patience:
                     print(f"\nEarly stopping triggered after {patience_counter} epochs without improvement.")
-                    break
+                    break # break from epoch loop
         else:
-            # Get the latest validation MI for logging
+            # Get the latest validation MI for logging (if step-based validation is active)
             avg_val_mi = mine_model.val_mi_history[-1] if mine_model.val_mi_history else 0.0
         
         # Save periodic checkpoint based on epochs
@@ -374,7 +373,7 @@ def main(config_path):
         epoch_time = time.time() - epoch_start_time
         
         # Print epoch summary
-        print(f"\nEpoch {epoch}/{epochs} | Time: {epoch_time:.2f}s | Steps: {steps_in_current_epoch} | "
+        print(f"\nEpoch {epoch}/{epochs} | Time: {epoch_time:.2f}s | Steps in epoch: {steps_in_current_epoch} | Total Steps: {global_step} | "
               f"Train MI: {avg_train_mi:.6f} | Train Loss: {avg_train_loss:.6f} | "
               f"Val MI: {avg_val_mi:.6f} | Best Val MI: {mine_model.best_val_mi:.6f} (Epoch {best_epoch if best_epoch > 0 else 'N/A'})")
         
@@ -382,33 +381,52 @@ def main(config_path):
         if epoch % log_interval == 0 or epoch == epochs:
             print("-" * 20 + f" Epoch {epoch} Stats " + "-" * 20)
             stats_info = mine_model.get_network_stats()
-            print(stats_info if isinstance(stats_info, str) else "\n".join([f"  {k}: {v}" for k, v in stats_info.items()]))
-            print("-" * (40 + len(f" Epoch {epoch} Stats ")))
+            # Ensure stats_info is printable
+            if isinstance(stats_info, dict):
+                 print("\n".join([f"  {k}: {v}" for k, v in stats_info.items()]))
+            else:
+                print(stats_info)
+            print("-" * (40 + len(f" Epoch {epoch} Stats ") + len(str(epoch)) -1 ))
+
 
     # Save final checkpoint
+    final_checkpoint_name = f"final_model_epoch_{epoch}.pth" # Use current epoch value if training ended early
     save_checkpoint(
-        mine_model, epochs, global_step, mine_model.best_val_mi,
-        checkpoint_dir, f"final_model_epoch_{epochs}.pth"
+        mine_model, epoch, global_step, mine_model.best_val_mi,
+        checkpoint_dir, final_checkpoint_name
     )
 
     total_training_time = time.time() - start_time
     print("\n" + "="*30)
     print("Training complete")
     print(f"Total training time: {total_training_time:.2f}s ({total_training_time/60:.2f} minutes)")
-    print(f"Best validation MI: {mine_model.best_val_mi:.6f} (achieved at Epoch {best_epoch})")
-    print(f"Best model checkpoint saved at: {best_checkpoint_path}")
+    print(f"Best validation MI: {mine_model.best_val_mi:.6f} (achieved at Epoch {best_epoch if best_epoch > 0 else 'N/A'})")
+    if best_checkpoint_path:
+        print(f"Best model checkpoint saved at: {best_checkpoint_path}")
+    else:
+        print(f"Final model saved at: {os.path.join(checkpoint_dir, final_checkpoint_name)}")
     print("="*30 + "\n")
 
     # --- 6. Testing ---
     # Load the best model for evaluation if available
-    if best_checkpoint_path and os.path.exists(best_checkpoint_path):
-        print(f"Loading best model from {best_checkpoint_path} for testing...")
-        try:
-            _, _, _ = load_checkpoint(mine_model, best_checkpoint_path)
-            print("Best model loaded successfully.")
-        except Exception as e:
-            print(f"Error loading best model: {e}")
-            print("Using final model for testing instead.")
+    model_to_test_path = best_checkpoint_path
+    if not model_to_test_path or not os.path.exists(model_to_test_path):
+        model_to_test_path = os.path.join(checkpoint_dir, final_checkpoint_name)
+        if not os.path.exists(model_to_test_path):
+            print("No suitable model checkpoint found for testing.")
+            print("="*30)
+            return
+
+
+    print(f"Loading model from {model_to_test_path} for testing...")
+    try:
+        _, _, _ = load_checkpoint(mine_model, model_to_test_path)
+        print("Model loaded successfully for testing.")
+    except Exception as e:
+        print(f"Error loading model for testing: {e}")
+        print("="*30)
+        return
+
 
     print("Evaluating on test set...")
     try:
@@ -464,27 +482,29 @@ model:
   y_type: 'float'           # 'float' or 'index'
   
   # --- Feature dimensions (for float type) ---
+  # These are BASE dimensions (before context windowing)
   x_dim: 128                # Base dimension of x features when x_type='float'
   y_dim: 256                # Base dimension of y features when y_type='float'
   
   # --- NEW: Projection dimensions (for dimensionality reduction) ---
+  # Projection layers operate on context-expanded dimensions
   x_proj_dim: 64            # Project effective x_dim to this dimension (only for float features)
   y_proj_dim: 64            # Project effective y_dim to this dimension (only for float features)
   
   # --- Required for x_type='index' ---
   # x_vocab_size: 5000        # Size of vocabulary for x
-  # x_embedding_dim: 256      # Embedding dimension for x
+  # x_embedding_dim: 256      # Embedding dimension for x (per frame)
   
   # --- Required for y_type='index' ---
   # y_vocab_size: 5000        # Size of vocabulary for y
-  # y_embedding_dim: 256      # Embedding dimension for y
+  # y_embedding_dim: 256      # Embedding dimension for y (per frame)
 
   # --- Common MLP parameters ---
   hidden_dims: [128, 64]    # Network hidden layer dimensions (after projection/embedding)
   activation: 'relu'        # Activation function: relu, leaky_relu, elu
   batch_norm: True          # Whether to use BatchNorm
   dropout: 0.1              # Dropout rate (0 means none)
-  bias_correction_method: none
+  bias_correction_method: none # 'none' or 'ema'
 
 training:
   epochs: 50                # Number of training epochs
@@ -501,7 +521,7 @@ validation:
 
 checkpoint:
   dir: './checkpoints'      # Directory to save checkpoints
-  save_interval: 10         # Save checkpoint every N epochs
+  save_interval: 10         # Save checkpoint every N epochs (or step-based if validate_every_n_steps is low)
   resume_from: null         # Path to checkpoint to resume from (null to start from scratch)
 
 logging:
